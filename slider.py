@@ -47,6 +47,7 @@ display_time = 10
 num_transition_frames = int(transition_time * 30)
 api_key = os.getenv('WEATHERMAP_API_KEY')
 client = os.getenv('OPENAI_API_KEY')
+
 print("API Keys")
 print(f"OpenAI API Key: {client}")
 print(f"WeatherMap API Key: {api_key}")
