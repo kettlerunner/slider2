@@ -48,8 +48,8 @@ num_transition_frames = int(transition_time * 30)
 api_key = os.getenv('WEATHERMAP_API_KEY')
 client = os.getenv('OPENAI_API_KEY')
 
-print(f"OpenAI API Key: {openai_api_key}")
-print(f"WeatherMap API Key: {weathermap_api_key}")
+print(f"OpenAI API Key: {client}")
+print(f"WeatherMap API Key: {api_key}")
 
 # If modifying these SCOPES, delete the file token.json.
 SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
