@@ -201,7 +201,6 @@ def start_slideshow(images):
     index = 0
     current_img = resize_and_pad(images[index], frame_width, frame_height)
     forecast = get_weather_forecast(api_key)
-    news = get_ai_generated_news()
 
     while True:
         temp, weather = get_weather_data(api_key)
