@@ -14,7 +14,6 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from openai import OpenAI
 from PIL import Image
-import pillow_heif
 import textwrap
 import re
 from collections import defaultdict
