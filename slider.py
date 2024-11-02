@@ -654,7 +654,7 @@ def main():
             local_file_metadata = local_metadata[file_name]
             
             # Check if the file has the same md5Checksum as the stored metadata
-            if local_file_metadata.get('md5Checksum') == file_metadata['md5Checksum']:
+            if (local_file_metadata['modifiedTime'] == file_metadata['modifiedTime'] and local_file_metadata['size'] == file_metadata['size']):
                 print(f"Skipping download of unchanged file: {file_name}")
                 
                 # Try loading the image only if it already exists locally
