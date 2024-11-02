@@ -220,42 +220,78 @@ def apply_transition(current_img, next_img, temp, weather, transition):
             exit()
 
 def main():
+    # Step 1: Initialize Drive service, folder, and metadata
     service = authenticate_drive()
     folder_id = '1hpBzZ_kiXpIBtRv1FN3da8zOhT5J0Ggi'
     files = list_files_in_folder(service, folder_id)
+
     temp_dir = 'images'
     os.makedirs(temp_dir, exist_ok=True)
+
     metadata_file = 'metadata.json'
     local_metadata = load_local_metadata(metadata_file)
     images = []
 
+    # Step 2: Download new/updated files and load images
     for file in files:
         file_name = file['name']
         file_path = os.path.join(temp_dir, file_name)
-        file_metadata = {'name': file_name, 'modifiedTime': file.get('modifiedTime'), 'size': file.get('size', 0)}
+        
+        # Create file metadata with modifiedTime and size
+        file_metadata = {
+            'name': file_name,
+            'modifiedTime': file.get('modifiedTime'),
+            'size': file.get('size', 0)
+        }
+
+        # Check for unchanged files using metadata and load them
         if file_name in local_metadata:
             local_file_metadata = local_metadata[file_name]
+            print(f"Checking file: {file_name}")
+
+            # Verify if file is unchanged by checking modifiedTime, size, and existence
             if (local_file_metadata['modifiedTime'] == file_metadata['modifiedTime'] and 
                 local_file_metadata['size'] == file_metadata['size'] and 
                 os.path.exists(file_path)):
+                
                 print(f"Skipping download of unchanged file: {file_name}")
+                
+                # Load the image directly from local storage
                 img = load_image(file_path)
                 if img is not None:
                     images.append(img)
+                    print(f"Loaded image: {file_name}")
+                else:
+                    print(f"Failed to load image: {file_name}")
                 continue
+            else:
+                print(f"File metadata mismatch or missing file for {file_name}, redownloading...")
 
+        # Download if file is new or has changed
         print(f"Downloading file: {file_name}")
-        if download_file(service, file['id'], file_path):
+        try:
+            download_file(service, file['id'], file_path)
             img = load_image(file_path)
             if img is not None:
                 images.append(img)
+                print(f"Successfully downloaded and loaded image: {file_name}")
+
+                # Update metadata after successful download
                 local_metadata[file_name] = file_metadata
                 save_local_metadata(metadata_file, local_metadata)
+            else:
+                print(f"Failed to load image after download: {file_name}")
 
+        except Exception as e:
+            print(f"Error downloading file {file_name}: {e}")
+            continue
+
+    # Exit if no images are available
     if not images:
         print("No images found in the folder.")
         return
 
+    # Step 3: Display slideshow
     start_slideshow(images)
 
 if __name__ == '__main__':
