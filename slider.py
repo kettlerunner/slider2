@@ -643,41 +643,46 @@ def main():
         file_name = file['name']
         file_path = os.path.join(temp_dir, file_name)
         
-        # Include md5Checksum in file_metadata for change detection
+        # Metadata using modifiedTime and size only
         file_metadata = {
             'name': file_name,
-            'md5Checksum': file.get('md5Checksum'),
+            'modifiedTime': file.get('modifiedTime'),
             'size': file.get('size', 0)
         }
-
+    
+        # Check if file metadata exists in local cache and matches size/modifiedTime
         if file_name in local_metadata:
             local_file_metadata = local_metadata[file_name]
-
-            print(f"Skipping download of unchanged file: {file_name}")
-            
-            # Try loading the image only if it already exists locally
-            if os.path.exists(file_path):
+    
+            # Skip download if modifiedTime and size match and file exists locally
+            if (local_file_metadata['modifiedTime'] == file_metadata['modifiedTime'] and 
+                    local_file_metadata['size'] == file_metadata['size'] and 
+                    os.path.exists(file_path)):
+                print(f"Skipping download of unchanged file: {file_name}")
+                
+                # Load the image directly from local storage
                 img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
                 if img is not None:
-                    if img.shape[2] == 3:
+                    if img.shape[2] == 3:  # Ensure BGRA format
                         img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
                     images.append(img)
-            continue
-
+                continue
+    
+        # Download if file is new or has changed
         print(f"Downloading file: {file_name}")
         download_file(service, file['id'], file_path)
         
-        # Load and process the image if download was successful
+        # Load the new image and ensure BGRA consistency
         img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
         if img is not None:
             if img.shape[2] == 3:
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
             images.append(img)
-
-        # Update local metadata with the new file's metadata
+    
+        # Update metadata with new/changed file information
         local_metadata[file_name] = file_metadata
-
-    # Save updated metadata to prevent repeated downloads in future runs
+    
+    # Save updated metadata to file
     save_local_metadata(metadata_file, local_metadata)
 
     if not images:
