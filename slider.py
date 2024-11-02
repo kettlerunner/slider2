@@ -642,34 +642,44 @@ def main():
     for file in files:
         file_name = file['name']
         file_path = os.path.join(temp_dir, file_name)
+        
+        # Include md5Checksum in file_metadata for change detection
         file_metadata = {
             'name': file_name,
-            'modifiedTime': file['modifiedTime'],
+            'md5Checksum': file.get('md5Checksum'),
             'size': file.get('size', 0)
         }
 
         if file_name in local_metadata:
             local_file_metadata = local_metadata[file_name]
-            if (local_file_metadata['modifiedTime'] == file_metadata['modifiedTime'] and
-                local_file_metadata['size'] == file_metadata['size']):
+            
+            # Check if the file has the same md5Checksum as the stored metadata
+            if local_file_metadata.get('md5Checksum') == file_metadata['md5Checksum']:
                 print(f"Skipping download of unchanged file: {file_name}")
-                img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
-                if img is not None:
-                    if img.shape[2] == 3:
-                        img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
-                    images.append(img)
+                
+                # Try loading the image only if it already exists locally
+                if os.path.exists(file_path):
+                    img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+                    if img is not None:
+                        if img.shape[2] == 3:
+                            img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+                        images.append(img)
                 continue
 
         print(f"Downloading file: {file_name}")
         download_file(service, file['id'], file_path)
+        
+        # Load and process the image if download was successful
         img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
         if img is not None:
             if img.shape[2] == 3:
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
             images.append(img)
 
+        # Update local metadata with the new file's metadata
         local_metadata[file_name] = file_metadata
 
+    # Save updated metadata to prevent repeated downloads in future runs
     save_local_metadata(metadata_file, local_metadata)
 
     if not images:
