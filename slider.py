@@ -248,6 +248,27 @@ def apply_transition(current_img, next_img, temp, weather, transition):
             cv2.destroyAllWindows()
             exit()
 
+def resize_and_pad(image, width, height):
+    """Resize an image to fit within the specified width and height, preserving aspect ratio and adding padding if necessary."""
+    h, w = image.shape[:2]
+    scale = min(width / w, height / h)
+    resized_image = cv2.resize(image, (int(w * scale), int(h * scale)))
+
+    # Determine if the image has an alpha channel (transparency)
+    has_alpha = image.shape[2] == 4
+    if has_alpha:
+        padded_image = np.zeros((height, width, 4), dtype=np.uint8)
+        padded_image[:, :, 3] = 0  # Set the alpha channel to fully transparent
+    else:
+        padded_image = np.zeros((height, width, 3), dtype=np.uint8)
+
+    # Center the resized image on the padded image
+    top_pad = (height - resized_image.shape[0]) // 2
+    left_pad = (width - resized_image.shape[1]) // 2
+    padded_image[top_pad:top_pad+resized_image.shape[0], left_pad:left_pad+resized_image.shape[1]] = resized_image
+
+    return padded_image
+
 def main():
     service = authenticate_drive()
     folder_id = '1hpBzZ_kiXpIBtRv1FN3da8zOhT5J0Ggi'
