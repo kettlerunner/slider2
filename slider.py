@@ -625,143 +625,138 @@ def save_local_metadata(metadata_file, metadata):
     with open(metadata_file, 'w') as f:
         json.dump(metadata, f)
 
-def main():
-    service = authenticate_drive()
+def load_image(file_path):
+    """Helper to load and convert images to BGRA format."""
+    img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+    if img is not None and img.shape[2] == 3:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+    return img
 
-    folder_id = '1hpBzZ_kiXpIBtRv1FN3da8zOhT5J0Ggi'  # Replace with your folder ID
+def start_slideshow(images):
+    """Run the main slideshow display loop with weather, news, and transitions."""
+    random.shuffle(images)
+    cv2.namedWindow('slideshow', cv2.WINDOW_FREERATIO)
+
+    # Set up transitions and initial content
+    transitions = [fade_transition, slide_transition_left, slide_transition_right, wipe_transition_top, wipe_transition_bottom]
+    index = 0
+    current_img = resize_and_pad(images[index], frame_width, frame_height)
+    forecast = get_weather_forecast(api_key)
+    news = get_ai_generated_news()
+
+    # Start slideshow loop
+    while True:
+        temp, weather = get_weather_data(api_key)
+        
+        # Choose display type for the current frame
+        display_type = random.choice(["single", "stitch", "quote", "forecast", "news"])
+        next_img = prepare_next_frame(display_type, images, index, forecast, news)
+        
+        # Update forecast and news hourly
+        if datetime.now().minute == 0:
+            forecast = get_weather_forecast(api_key)
+            news = get_ai_generated_news()
+
+        # Display current frame with overlay
+        show_frame_with_overlay(current_img, temp, weather)
+
+        # Apply transition between frames
+        apply_transition(current_img, next_img, temp, weather, random.choice(transitions))
+
+        # Prepare for the next loop iteration
+        current_img = next_img
+        index = (index + 1) % len(images)
+
+def prepare_next_frame(display_type, images, index, forecast, news):
+    """Prepare the next frame based on the display type."""
+    single_image = images[(index + 1) % len(images)]
+    if display_type == "forecast":
+        next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
+        next_img = add_forecast_overlay(next_img, forecast)
+    elif display_type == "news":
+        next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
+        next_img = add_news_overlay(next_img, news)
+    elif display_type == "stitch":
+        next_img = stitch_images(random.sample(images, random.randint(2, 4)), frame_width, frame_height)
+    elif display_type == "quote":
+        next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
+        quote, source = get_random_quote()
+        next_img = add_quote_overlay(next_img, quote, source)
+    else:  # Default single image display
+        next_img = create_single_image_with_background(single_image, frame_width, frame_height)
+    return next_img
+
+def show_frame_with_overlay(frame, temp, weather):
+    """Display the frame with time and weather overlay."""
+    frame_with_overlay = add_time_overlay(frame, temp, weather)
+    cv2.imshow('slideshow', frame_with_overlay)
+    if cv2.waitKey(display_time * 1000) == ord('q'):
+        cv2.destroyAllWindows()
+        exit()
+
+def apply_transition(current_img, next_img, temp, weather, transition):
+    """Apply transition between frames with weather overlay."""
+    for frame in transition(current_img, next_img, num_transition_frames):
+        frame_with_overlay = add_time_overlay(frame, temp, weather)
+        cv2.imshow('slideshow', frame_with_overlay)
+        if cv2.waitKey(1) == ord('q'):
+            cv2.destroyAllWindows()
+            exit()
+
+def main():
+    # Step 1: Initialize Drive service, folder, and metadata
+    service = authenticate_drive()
+    folder_id = '1hpBzZ_kiXpIBtRv1FN3da8zOhT5J0Ggi'
     files = list_files_in_folder(service, folder_id)
 
     temp_dir = 'images'
-    if not os.path.exists(temp_dir):
-        os.makedirs(temp_dir)
+    os.makedirs(temp_dir, exist_ok=True)
 
     metadata_file = 'metadata.json'
     local_metadata = load_local_metadata(metadata_file)
 
     images = []
+
+    # Step 2: Download new/updated files and load images
     for file in files:
         file_name = file['name']
         file_path = os.path.join(temp_dir, file_name)
         
-        # Metadata using modifiedTime and size only
+        # Create file metadata with modifiedTime and size
         file_metadata = {
             'name': file_name,
             'modifiedTime': file.get('modifiedTime'),
             'size': file.get('size', 0)
         }
-    
-        # Check if file metadata exists in local cache and matches size/modifiedTime
+
+        # Check for unchanged files using metadata and load them
         if file_name in local_metadata:
             local_file_metadata = local_metadata[file_name]
-    
-            # Skip download if modifiedTime and size match and file exists locally
             if (local_file_metadata['modifiedTime'] == file_metadata['modifiedTime'] and 
-                    local_file_metadata['size'] == file_metadata['size'] and 
-                    os.path.exists(file_path)):
+                local_file_metadata['size'] == file_metadata['size'] and 
+                os.path.exists(file_path)):
                 print(f"Skipping download of unchanged file: {file_name}")
-                
-                # Load the image directly from local storage
-                img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+                img = load_image(file_path)
                 if img is not None:
-                    if img.shape[2] == 3:  # Ensure BGRA format
-                        img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
                     images.append(img)
                 continue
-    
-        # Download if file is new or has changed
-        print(f"Downloading file: {file_name}")
-        download_file(service, file['id'], file_path)
-        
-        # Load the new image and ensure BGRA consistency
-        img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
-        if img is not None:
-            if img.shape[2] == 3:
-                img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
-            images.append(img)
-    
-        # Update metadata with new/changed file information
-        local_metadata[file_name] = file_metadata
-    
-    # Save updated metadata to file
-    save_local_metadata(metadata_file, local_metadata)
 
+        # Download and update metadata
+        print(f"Downloading file: {file_name}")
+        if download_file(service, file['id'], file_path):
+            img = load_image(file_path)
+            if img is not None:
+                images.append(img)
+                local_metadata[file_name] = file_metadata  # Update metadata after successful download
+                save_local_metadata(metadata_file, local_metadata)
+
+    # Exit if no images are available
     if not images:
         print("No images found in the folder.")
-        exit()
+        return
 
-    random.shuffle(images)
-
-    cv2.namedWindow('slideshow', cv2.WINDOW_FREERATIO)
-
-    transitions = [
-        fade_transition,
-        slide_transition_left,
-        slide_transition_right,
-        wipe_transition_top,
-        wipe_transition_bottom
-    ]
-
-    index = 0
-    current_img = resize_and_pad(images[index], frame_width, frame_height)
-    forecast = get_weather_forecast(api_key)
-    news = get_ai_generated_news()
-    while True:
-        temp, weather = get_weather_data(api_key)
-        
-        # Randomly choose display type: single image, stitched images, or quote
-        display_type = random.choice(["single", "stitch", "quote", "forecast"])
-        
-        if display_type == "forecast":
-            single_image = images[(index + 1) % len(images)]
-            next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
-            next_img = add_forecast_overlay(next_img, forecast)
-        elif display_type == "news":
-            single_image = images[(index + 1) % len(images)]
-            next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
-            news = get_ai_generated_news()
-            next_img = add_news_overlay(next_img, news)
-        elif display_type == "stitch":
-            stitch_count = random.randint(2, 4)
-            stitch_indices = random.sample(range(len(images)), stitch_count)
-            stitched_images = [images[i] for i in stitch_indices]
-            next_img = stitch_images(stitched_images, frame_width, frame_height)
-            if next_img.shape[2] == 4:
-                next_img = cv2.cvtColor(next_img, cv2.COLOR_BGRA2BGR)
-        elif display_type == "quote":
-            single_image = images[(index + 1) % len(images)]
-            next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
-            quote, source = get_random_quote()
-            next_img = add_quote_overlay(next_img, quote, source)
-        else:
-            single_image = images[(index + 1) % len(images)]
-            next_img = create_single_image_with_background(single_image, frame_width, frame_height)
-        
-        # Update forecast and news periodically (e.g., every hour)
-        if datetime.now().minute == 0:
-            forecast = get_weather_forecast(api_key)
-
-        frame_with_overlay = add_time_overlay(current_img, temp, weather)
-        cv2.imshow('slideshow', frame_with_overlay)
-        if cv2.waitKey(display_time * 1000) == ord('q'):
-            cv2.destroyAllWindows()
-            exit()
-
-        transition = random.choice(transitions)
-        for frame in transition(current_img, next_img, num_transition_frames):
-            frame_with_overlay = add_time_overlay(frame, temp, weather)
-            cv2.imshow('slideshow', frame_with_overlay)
-            if cv2.waitKey(1) == ord('q'):
-                cv2.destroyAllWindows()
-                exit()
-
-        frame_with_overlay = add_time_overlay(next_img, temp, weather)
-        cv2.imshow('slideshow', frame_with_overlay)
-        if cv2.waitKey(display_time * 1000) == ord('q'):
-            cv2.destroyAllWindows()
-            exit()
-
-        current_img = next_img
-        index = (index + 1) % len(images)
+    # Step 3: Display slideshow
+    start_slideshow(images)
 
 if __name__ == '__main__':
     main()
