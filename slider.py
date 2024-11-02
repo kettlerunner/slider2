@@ -252,28 +252,24 @@ def start_slideshow(images):
     index = 0
     current_img = resize_and_pad(images[index], frame_width, frame_height)
     forecast = get_weather_forecast(api_key)
-    news = get_ai_generated_news()
 
     while True:
         temp, weather = get_weather_data(api_key)
-        display_type = random.choice(["single", "stitch", "quote", "forecast", "news"])
-        next_img = prepare_next_frame(display_type, images, index, forecast, news)
+        display_type = random.choice(["single", "stitch", "quote", "forecast"])
+        next_img = prepare_next_frame(display_type, images, index, forecast)
         if datetime.now().minute == 0:
             forecast = get_weather_forecast(api_key)
-            news = get_ai_generated_news()
+            
         show_frame_with_overlay(current_img, temp, weather)
         apply_transition(current_img, next_img, temp, weather, random.choice(transitions))
         current_img = next_img
         index = (index + 1) % len(images)
 
-def prepare_next_frame(display_type, images, index, forecast, news):
+def prepare_next_frame(display_type, images, index, forecast):
     single_image = images[(index + 1) % len(images)]
     if display_type == "forecast":
         next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
         next_img = add_forecast_overlay(next_img, forecast)
-    elif display_type == "news":
-        next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
-        next_img = add_news_overlay(next_img, news)
     elif display_type == "stitch":
         next_img = stitch_images(random.sample(images, min(4, len(images))), frame_width, frame_height)
     elif display_type == "quote":
