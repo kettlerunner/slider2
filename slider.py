@@ -14,6 +14,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from openai import OpenAI
 from PIL import Image
+import pillow_heif
 import textwrap
 import re
 from collections import defaultdict
@@ -193,6 +194,57 @@ def wipe_transition_bottom(current_img, next_img, num_frames):
         frame[:dy, :] = next_img[current_img.shape[0] - dy:, :]
         yield frame
 
+# Image Processing Functions
+def resize_and_pad(image, width, height):
+    h, w = image.shape[:2]
+    scale = min(width / w, height / h)
+    resized_image = cv2.resize(image, (int(w * scale), int(h * scale)))
+    has_alpha = image.shape[2] == 4
+    padded_image = np.zeros((height, width, 4 if has_alpha else 3), dtype=np.uint8)
+    top_pad = (height - resized_image.shape[0]) // 2
+    left_pad = (width - resized_image.shape[1]) // 2
+    padded_image[top_pad:top_pad+resized_image.shape[0], left_pad:left_pad+resized_image.shape[1]] = resized_image
+    return padded_image
+
+def create_zoomed_blurred_background(image, width, height):
+    image_copy = image.copy()
+    h, w = image_copy.shape[:2]
+    scale = max(width / w, height / h) * 1.1
+    zoomed_image = cv2.resize(image_copy, (int(w * scale), int(h * scale)))
+    start_x = (zoomed_image.shape[1] - width) // 2
+    start_y = (zoomed_image.shape[0] - height) // 2
+    cropped_image = zoomed_image[start_y:start_y + height, start_x:start_x + width]
+    blurred_image = cv2.GaussianBlur(cropped_image, (51, 51), 0)
+    return blurred_image
+
+def stitch_images(images, width, height):
+    num_images = len(images)
+    stitched_image = np.ones((height, width, 3), dtype=np.uint8) * 255
+    background_image = random.choice(images)
+    if background_image.shape[2] == 4:
+        background_image = cv2.cvtColor(background_image, cv2.COLOR_BGRA2BGR)
+    blurred_background = create_zoomed_blurred_background(background_image, width, height)
+    rows = cols = int(np.ceil(np.sqrt(num_images)))
+    grid_width = width // cols
+    grid_height = height // rows
+    for i, image in enumerate(images):
+        resized_image = resize_and_pad(image, grid_width, grid_height)
+        row = i // cols
+        col = i % cols
+        start_x = col * grid_width
+        start_y = row * grid_height
+        if resized_image.shape[2] == 4:
+            rgb_image = cv2.cvtColor(resized_image, cv2.COLOR_BGRA2BGR)
+            alpha = resized_image[:, :, 3] / 255.0
+            alpha = np.repeat(alpha[:, :, np.newaxis], 3, axis=2)
+            stitched_image[start_y:start_y+grid_height, start_x:start_x+grid_width] = (
+                (1 - alpha) * stitched_image[start_y:start_y+grid_height, start_x:start_x+grid_width] +
+                alpha * rgb_image
+            )
+        else:
+            stitched_image[start_y:start_y+grid_height, start_x:start_x+grid_width] = resized_image
+    return stitched_image
+
 # Main Slideshow Functions
 def start_slideshow(images):
     random.shuffle(images)
@@ -201,25 +253,30 @@ def start_slideshow(images):
     index = 0
     current_img = resize_and_pad(images[index], frame_width, frame_height)
     forecast = get_weather_forecast(api_key)
+    news = get_ai_generated_news()
 
     while True:
         temp, weather = get_weather_data(api_key)
-        display_type = random.choice(["single", "stitch", "quote", "forecast"])
-        next_img = prepare_next_frame(display_type, images, index, forecast)
+        display_type = random.choice(["single", "stitch", "quote", "forecast", "news"])
+        next_img = prepare_next_frame(display_type, images, index, forecast, news)
         if datetime.now().minute == 0:
             forecast = get_weather_forecast(api_key)
+            news = get_ai_generated_news()
         show_frame_with_overlay(current_img, temp, weather)
         apply_transition(current_img, next_img, temp, weather, random.choice(transitions))
         current_img = next_img
         index = (index + 1) % len(images)
 
-def prepare_next_frame(display_type, images, index, forecast):
+def prepare_next_frame(display_type, images, index, forecast, news):
     single_image = images[(index + 1) % len(images)]
     if display_type == "forecast":
         next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
         next_img = add_forecast_overlay(next_img, forecast)
+    elif display_type == "news":
+        next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
+        next_img = add_news_overlay(next_img, news)
     elif display_type == "stitch":
-        next_img = stitch_images(random.sample(images, random.randint(2, 4)), frame_width, frame_height)
+        next_img = stitch_images(random.sample(images, min(4, len(images))), frame_width, frame_height)
     elif display_type == "quote":
         next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
         quote, source = get_random_quote()
@@ -228,62 +285,7 @@ def prepare_next_frame(display_type, images, index, forecast):
         next_img = create_single_image_with_background(single_image, frame_width, frame_height)
     return next_img
 
-def show_frame_with_overlay(frame, temp, weather):
-    frame_with_overlay = add_time_overlay(frame, temp, weather)
-    cv2.imshow('slideshow', frame_with_overlay)
-    if cv2.waitKey(display_time * 1000) == ord('q'):
-        cv2.destroyAllWindows()
-        exit()
-
-def apply_transition(current_img, next_img, temp, weather, transition):
-    for frame in transition(current_img, next_img, num_transition_frames):
-        frame_with_overlay = add_time_overlay(frame, temp, weather)
-        cv2.imshow('slideshow', frame_with_overlay)
-        if cv2.waitKey(1) == ord('q'):
-            cv2.destroyAllWindows()
-            exit()
-
-def resize_and_pad(image, width, height):
-    """Resize an image to fit within the specified width and height, preserving aspect ratio and adding padding if necessary."""
-    h, w = image.shape[:2]
-    scale = min(width / w, height / h)
-    resized_image = cv2.resize(image, (int(w * scale), int(h * scale)))
-
-    # Determine if the image has an alpha channel (transparency)
-    has_alpha = image.shape[2] == 4
-    if has_alpha:
-        padded_image = np.zeros((height, width, 4), dtype=np.uint8)
-        padded_image[:, :, 3] = 0  # Set the alpha channel to fully transparent
-    else:
-        padded_image = np.zeros((height, width, 3), dtype=np.uint8)
-
-    # Center the resized image on the padded image
-    top_pad = (height - resized_image.shape[0]) // 2
-    left_pad = (width - resized_image.shape[1]) // 2
-    padded_image[top_pad:top_pad+resized_image.shape[0], left_pad:left_pad+resized_image.shape[1]] = resized_image
-
-    return padded_image
-
-def create_zoomed_blurred_background(image, width, height):
-    """Create a blurred background by zooming into the image and applying Gaussian blur."""
-    # Make a copy of the image to avoid altering the original
-    image_copy = image.copy()
-    h, w = image_copy.shape[:2]
-
-    # Calculate the scale needed to fill the background area
-    scale = max(width / w, height / h) * 1.1  # Zoom in slightly more for effect
-    zoomed_image = cv2.resize(image_copy, (int(w * scale), int(h * scale)))
-
-    # Center-crop the zoomed image to fit the background size
-    start_x = (zoomed_image.shape[1] - width) // 2
-    start_y = (zoomed_image.shape[0] - height) // 2
-    cropped_image = zoomed_image[start_y:start_y + height, start_x:start_x + width]
-
-    # Apply Gaussian blur to the cropped image
-    blurred_image = cv2.GaussianBlur(cropped_image, (51, 51), 0)
-    return blurred_image
-
-
+# Main Program
 def main():
     service = authenticate_drive()
     folder_id = '1hpBzZ_kiXpIBtRv1FN3da8zOhT5J0Ggi'
