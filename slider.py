@@ -94,6 +94,35 @@ def download_file(service, file_id, file_name):
     while not done:
         status, done = downloader.next_chunk()
 
+def create_single_image_with_background(image, width, height):
+    """Create a displayable image by adding a blurred background to a single image."""
+    # Check if the image has an alpha channel
+    if image.shape[2] == 4:
+        bg_image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+    else:
+        bg_image = image.copy()
+
+    # Create a blurred background
+    blurred_background = create_zoomed_blurred_background(bg_image, width, height)
+    resized_image = resize_and_pad(image, width, height)
+
+    # Calculate padding to center the resized image
+    top_pad = (height - resized_image.shape[0]) // 2
+    left_pad = (width - resized_image.shape[1]) // 2
+
+    # Overlay the resized image onto the blurred background
+    if resized_image.shape[2] == 4:
+        rgb_image = cv2.cvtColor(resized_image, cv2.COLOR_BGRA2BGR)
+        alpha = resized_image[:, :, 3] / 255.0
+        alpha = np.repeat(alpha[:, :, np.newaxis], 3, axis=2)
+        background = blurred_background[top_pad:top_pad+resized_image.shape[0], left_pad:left_pad+resized_image.shape[1]]
+        combined = (1 - alpha) * background + alpha * rgb_image
+        blurred_background[top_pad:top_pad+resized_image.shape[0], left_pad:left_pad+resized_image.shape[1]] = combined
+    else:
+        blurred_background[top_pad:top_pad+resized_image.shape[0], left_pad:left_pad+resized_image.shape[1]] = resized_image
+
+    return blurred_background
+
 # Data Functions
 def get_weather_forecast(api_key, city="Waupun", country_code="US"):
     url = f"http://api.openweathermap.org/data/2.5/forecast?q={city},{country_code}&units=imperial&appid={api_key}"
