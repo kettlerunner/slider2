@@ -210,6 +210,65 @@ def show_frame_with_overlay(frame, temp, weather):
         cv2.destroyAllWindows()
         exit()
 
+def add_quote_overlay(frame, quote, source):
+    """Display a quote and its source as an overlay on the frame."""
+    # Sanitize the text to remove any problematic characters
+    quote = sanitize_text(quote)
+    source = sanitize_text(source)
+
+    # Font settings
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale_quote = 0.8
+    font_scale_source = 0.6
+    font_color = (255, 255, 255)
+    thickness = 1
+
+    # Maximum width for text, with padding
+    max_width = frame.shape[1] - 40  # 20-pixel padding on each side
+
+    # Split the quote and source into multiple lines to fit within the max width
+    quote_lines = textwrap.wrap(quote, width=50)
+    source_lines = textwrap.wrap(f"- {source}", width=50)
+
+    # Calculate the total height of the overlay text
+    text_height = 0
+    line_height_quote = cv2.getTextSize("Test", font, font_scale_quote, thickness)[0][1]
+    line_height_source = cv2.getTextSize("Test", font, font_scale_source, thickness)[0][1]
+
+    text_height += line_height_quote * len(quote_lines)
+    text_height += line_height_source * len(source_lines)
+    text_height += 20  # Additional padding between quote and source
+
+    # Determine the dimensions of the box
+    box_width = max_width + 40  # Adding padding
+    box_height = text_height + 80  # Adding padding
+    box_x = (frame.shape[1] - box_width) // 2
+    box_y = (frame.shape[0] - box_height) // 2
+
+    # Draw the semi-transparent box
+    overlay_frame = frame.copy()
+    cv2.rectangle(overlay_frame, (box_x, box_y), (box_x + box_width, box_y + box_height), (50, 50, 50), -1)
+    alpha = 0.8  # Transparency factor
+    cv2.addWeighted(overlay_frame, alpha, frame, 1 - alpha, 0, overlay_frame)
+
+    # Draw each line of the quote text within the box
+    y = box_y + 20  # Padding inside the box
+    for line in quote_lines:
+        text_size, _ = cv2.getTextSize(line, font, font_scale_quote, thickness)
+        x = (frame.shape[1] - text_size[0]) // 2  # Center the text horizontally
+        cv2.putText(overlay_frame, line, (x, y + text_size[1]), font, font_scale_quote, font_color, thickness, cv2.LINE_AA)
+        y += text_size[1] + 10  # Line height + padding
+
+    # Draw each line of the source text below the quote
+    y += 10  # Additional padding before the source
+    for line in source_lines:
+        text_size, _ = cv2.getTextSize(line, font, font_scale_source, thickness)
+        x = (frame.shape[1] - text_size[0]) // 2  # Center the text horizontally
+        cv2.putText(overlay_frame, line, (x, y + text_size[1]), font, font_scale_source, font_color, thickness, cv2.LINE_AA)
+        y += text_size[1] + 10  # Line height + padding
+
+    return overlay_frame
+
 def download_file(service, file_id, file_name):
     request = service.files().get_media(fileId=file_id)
     fh = io.FileIO(file_name, 'wb')
