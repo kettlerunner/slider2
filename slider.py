@@ -13,6 +13,8 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from openai import OpenAI
+from PIL import Image
+import pillow_heif
 import textwrap
 import re
 from collections import defaultdict
@@ -47,6 +49,19 @@ def save_local_metadata(metadata_file, metadata):
         json.dump(metadata, f)
 
 def load_image(file_path):
+    """Helper to load and convert images to BGRA format. Converts HEIC to JPEG if necessary."""
+    if file_path.lower().endswith(".heic"):
+        try:
+            heif_file = pillow_heif.read_heif(file_path)
+            image = Image.frombytes(heif_file.mode, heif_file.size, heif_file.data, "raw")
+            jpeg_path = file_path.rsplit(".", 1)[0] + ".jpeg"
+            image = image.convert("RGB")
+            image.save(jpeg_path, "JPEG")
+            file_path = jpeg_path
+            print(f"Converted HEIC to JPEG: {file_path}")
+        except Exception as e:
+            print(f"Failed to convert HEIC image: {file_path}. Error: {e}")
+            return None
     img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
     if img is not None and img.shape[2] == 3:
         img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
@@ -128,43 +143,58 @@ def get_weather_data(api_key, cache_file='weather_cache.json'):
     print("Error fetching weather data")
     return None, None
 
-# Overlay and Transition Functions
-def add_forecast_overlay(frame, forecast):
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    font_color = (255, 255, 255)
-    thickness = 1
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (0, 0), (frame.shape[1], 200), (50, 50, 50), -1)
-    cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
-    cv2.putText(frame, "5-Day Forecast", (10, 30), font, 0.8, font_color, 2, cv2.LINE_AA)
-    col_width = frame.shape[1] // 5
-    for i, day in enumerate(forecast):
-        x, y = i * col_width + 10, 60
-        cv2.putText(frame, day['date'].split(',')[0], (x, y), font, 0.5, font_color, thickness, cv2.LINE_AA)
-        y += 25
-        cv2.putText(frame, day['date'].split(',')[1].strip(), (x, y), font, 0.5, font_color, thickness, cv2.LINE_AA)
-        y += 35
-        temp_text = f"{day['temp_min']:.1f} - {day['temp_max']:.1f} F"
-        cv2.putText(frame, temp_text, (x, y), font, 0.5, font_color, thickness, cv2.LINE_AA)
-        y += 35
-        icon = get_weather_icon(day['description'])
-        cv2.putText(frame, icon, (x + 15, y), font, 0.5, font_color, thickness, cv2.LINE_AA)
-        y += 30
-        cv2.putText(frame, day['description'], (x, y), font, 0.4, font_color, thickness, cv2.LINE_AA)
-    return frame
+# Transition Functions
+def ensure_same_channels(img1, img2):
+    if img1.shape[2] != img2.shape[2]:
+        if img1.shape[2] == 3:
+            img1 = cv2.cvtColor(img1, cv2.COLOR_BGR2BGRA)
+        else:
+            img2 = cv2.cvtColor(img2, cv2.COLOR_BGR2BGRA)
+    return img1, img2
 
-def get_weather_icon(description):
-    if 'clear' in description.lower():
-        return '☀️'
-    elif 'cloud' in description.lower():
-        return '☁️'
-    elif 'rain' in description.lower():
-        return '🌧️'
-    elif 'snow' in description.lower():
-        return '❄️'
-    return '🌤️'
+def fade_transition(current_img, next_img, num_frames):
+    current_img, next_img = ensure_same_channels(current_img, next_img)
+    for alpha in np.linspace(0, 1, num_frames):
+        blended_frame = cv2.addWeighted(current_img, 1 - alpha, next_img, alpha, 0)
+        yield blended_frame
 
-# Main Functions
+def slide_transition_left(current_img, next_img, num_frames):
+    current_img, next_img = ensure_same_channels(current_img, next_img)
+    for i in range(num_frames):
+        dx = int(current_img.shape[1] * i / num_frames)
+        frame = np.zeros_like(current_img)
+        frame[:, :current_img.shape[1] - dx] = current_img[:, dx:]
+        frame[:, current_img.shape[1] - dx:] = next_img[:, :dx]
+        yield frame
+
+def slide_transition_right(current_img, next_img, num_frames):
+    current_img, next_img = ensure_same_channels(current_img, next_img)
+    for i in range(num_frames):
+        dx = int(current_img.shape[1] * i / num_frames)
+        frame = np.zeros_like(current_img)
+        frame[:, dx:] = current_img[:, :current_img.shape[1] - dx]
+        frame[:, :dx] = next_img[:, current_img.shape[1] - dx:]
+        yield frame
+
+def wipe_transition_top(current_img, next_img, num_frames):
+    current_img, next_img = ensure_same_channels(current_img, next_img)
+    for i in range(num_frames):
+        dy = int(current_img.shape[0] * i / num_frames)
+        frame = np.zeros_like(current_img)
+        frame[:current_img.shape[0] - dy, :] = current_img[dy:, :]
+        frame[current_img.shape[0] - dy:, :] = next_img[:dy, :]
+        yield frame
+
+def wipe_transition_bottom(current_img, next_img, num_frames):
+    current_img, next_img = ensure_same_channels(current_img, next_img)
+    for i in range(num_frames):
+        dy = int(current_img.shape[0] * i / num_frames)
+        frame = np.zeros_like(current_img)
+        frame[dy:, :] = current_img[:current_img.shape[0] - dy, :]
+        frame[:dy, :] = next_img[current_img.shape[0] - dy:, :]
+        yield frame
+
+# Main Slideshow Functions
 def start_slideshow(images):
     random.shuffle(images)
     cv2.namedWindow('slideshow', cv2.WINDOW_FREERATIO)
@@ -220,78 +250,41 @@ def apply_transition(current_img, next_img, temp, weather, transition):
             exit()
 
 def main():
-    # Step 1: Initialize Drive service, folder, and metadata
     service = authenticate_drive()
     folder_id = '1hpBzZ_kiXpIBtRv1FN3da8zOhT5J0Ggi'
     files = list_files_in_folder(service, folder_id)
-
     temp_dir = 'images'
     os.makedirs(temp_dir, exist_ok=True)
-
     metadata_file = 'metadata.json'
     local_metadata = load_local_metadata(metadata_file)
     images = []
 
-    # Step 2: Download new/updated files and load images
     for file in files:
         file_name = file['name']
         file_path = os.path.join(temp_dir, file_name)
-        
-        # Create file metadata with modifiedTime and size
-        file_metadata = {
-            'name': file_name,
-            'modifiedTime': file.get('modifiedTime'),
-            'size': file.get('size', 0)
-        }
-
-        # Check for unchanged files using metadata and load them
+        file_metadata = {'name': file_name, 'modifiedTime': file.get('modifiedTime'), 'size': file.get('size', 0)}
         if file_name in local_metadata:
             local_file_metadata = local_metadata[file_name]
-            print(f"Checking file: {file_name}")
-
-            # Verify if file is unchanged by checking modifiedTime, size, and existence
             if (local_file_metadata['modifiedTime'] == file_metadata['modifiedTime'] and 
                 local_file_metadata['size'] == file_metadata['size'] and 
                 os.path.exists(file_path)):
-                
                 print(f"Skipping download of unchanged file: {file_name}")
-                
-                # Load the image directly from local storage
                 img = load_image(file_path)
                 if img is not None:
                     images.append(img)
-                    print(f"Loaded image: {file_name}")
-                else:
-                    print(f"Failed to load image: {file_name}")
                 continue
-            else:
-                print(f"File metadata mismatch or missing file for {file_name}, redownloading...")
-
-        # Download if file is new or has changed
         print(f"Downloading file: {file_name}")
-        try:
-            download_file(service, file['id'], file_path)
-            img = load_image(file_path)
-            if img is not None:
-                images.append(img)
-                print(f"Successfully downloaded and loaded image: {file_name}")
+        download_file(service, file['id'], file_path)
+        img = load_image(file_path)
+        if img is not None:
+            images.append(img)
+            local_metadata[file_name] = file_metadata
+            save_local_metadata(metadata_file, local_metadata)
 
-                # Update metadata after successful download
-                local_metadata[file_name] = file_metadata
-                save_local_metadata(metadata_file, local_metadata)
-            else:
-                print(f"Failed to load image after download: {file_name}")
-
-        except Exception as e:
-            print(f"Error downloading file {file_name}: {e}")
-            continue
-
-    # Exit if no images are available
     if not images:
         print("No images found in the folder.")
         return
 
-    # Step 3: Display slideshow
     start_slideshow(images)
 
 if __name__ == '__main__':
