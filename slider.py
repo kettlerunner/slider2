@@ -18,7 +18,7 @@ import textwrap
 import re
 from collections import defaultdict
 
-# Constants
+# Constants ... updated  
 frame_width = 800
 frame_height = 480
 transition_time = 2
