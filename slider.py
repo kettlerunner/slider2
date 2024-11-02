@@ -161,6 +161,55 @@ def list_files_in_folder(service, folder_id):
     results = service.files().list(q=query, pageSize=100, fields="nextPageToken, files(id, name, modifiedTime, size)").execute()
     return results.get('files', [])
 
+def show_frame_with_overlay(frame, temp, weather):
+    """Display the frame with time and weather overlay."""
+    # Get the current time
+    time_text = datetime.now().strftime("%B %d %Y, %I:%M %p")
+    
+    # Prepare weather information
+    weather_text = f"Temp: {temp:.1f} F" if temp is not None else "Weather data unavailable"
+    if weather:
+        if "rain" in weather.lower():
+            weather_text += ", Rain Predicted"
+        elif "snow" in weather.lower():
+            weather_text += ", Snow Predicted"
+        elif "cloud" in weather.lower():
+            weather_text += ", Cloudy"
+        else:
+            weather_text += ", Clear"
+
+    # Font settings
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.6
+    font_color = (255, 255, 255)
+    thickness = 1
+
+    # Calculate positions for time and weather text
+    text_size_time, _ = cv2.getTextSize(time_text, font, font_scale, thickness)
+    text_size_weather, _ = cv2.getTextSize(weather_text, font, font_scale, thickness)
+    
+    text_x_weather = 10
+    text_y = frame.shape[0] - 20
+    text_x_time = frame.shape[1] - text_size_time[0] - 10
+
+    # Create a semi-transparent overlay
+    overlay_frame = frame.copy()
+    bar_height = max(text_size_time[1], text_size_weather[1]) + 20
+    overlay = overlay_frame.copy()
+    cv2.rectangle(overlay, (0, frame.shape[0] - bar_height), (frame.shape[1], frame.shape[0]), (50, 50, 50), -1)
+    alpha = 0.8  # Transparency factor
+    cv2.addWeighted(overlay, alpha, overlay_frame, 1 - alpha, 0, overlay_frame)
+
+    # Add text to the overlay frame
+    cv2.putText(overlay_frame, weather_text, (text_x_weather, text_y), font, font_scale, font_color, thickness, cv2.LINE_AA)
+    cv2.putText(overlay_frame, time_text, (text_x_time, text_y), font, font_scale, font_color, thickness, cv2.LINE_AA)
+
+    # Display the frame
+    cv2.imshow('slideshow', overlay_frame)
+    if cv2.waitKey(display_time * 1000) == ord('q'):
+        cv2.destroyAllWindows()
+        exit()
+
 def download_file(service, file_id, file_name):
     request = service.files().get_media(fileId=file_id)
     fh = io.FileIO(file_name, 'wb')
