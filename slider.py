@@ -264,6 +264,26 @@ def resize_and_pad(image, width, height):
 
     return padded_image
 
+def create_zoomed_blurred_background(image, width, height):
+    """Create a blurred background by zooming into the image and applying Gaussian blur."""
+    # Make a copy of the image to avoid altering the original
+    image_copy = image.copy()
+    h, w = image_copy.shape[:2]
+
+    # Calculate the scale needed to fill the background area
+    scale = max(width / w, height / h) * 1.1  # Zoom in slightly more for effect
+    zoomed_image = cv2.resize(image_copy, (int(w * scale), int(h * scale)))
+
+    # Center-crop the zoomed image to fit the background size
+    start_x = (zoomed_image.shape[1] - width) // 2
+    start_y = (zoomed_image.shape[0] - height) // 2
+    cropped_image = zoomed_image[start_y:start_y + height, start_x:start_x + width]
+
+    # Apply Gaussian blur to the cropped image
+    blurred_image = cv2.GaussianBlur(cropped_image, (51, 51), 0)
+    return blurred_image
+
+
 def main():
     service = authenticate_drive()
     folder_id = '1hpBzZ_kiXpIBtRv1FN3da8zOhT5J0Ggi'
