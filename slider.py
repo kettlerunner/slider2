@@ -17,6 +17,7 @@ from PIL import Image
 import textwrap
 import re
 from collections import defaultdict
+import random
 
 # Constants ... updated  
 frame_width = 800
@@ -80,6 +81,80 @@ def authenticate_drive():
         with open('token.json', 'w') as token:
             token.write(creds.to_json())
     return build('drive', 'v3', credentials=creds)
+
+def get_random_quote():
+    """Fetch a random inspirational quote using OpenAI."""
+    prompts = [
+        """Generate an uncommon, thought-provoking quote. Draw from a wide range of sources including:
+        - Ancient wisdom traditions
+        - Modern thinkers and innovators
+        - Indigenous cultures
+        - Scientists and researchers
+        - Artists and creatives
+        - Activists and change-makers
+        - Philosophers from various schools of thought
+        - Literary figures from different genres
+
+        Prioritize lesser-known quotes that offer unique perspectives or challenge conventional wisdom. Avoid commonly cited or viral quotes. Respond only with the quote and source in this JSON format:
+
+        {
+          "quote": "The quote text goes here.",
+          "source": "Name, brief description of who they are"
+        }""",
+
+        """Create an inspiring quote that feels fresh and original. Consider these approaches:
+        - Combine ideas from different fields (e.g., science and art, technology and nature)
+        - Use unexpected metaphors or analogies
+        - Offer a counterintuitive perspective
+        - Frame a common idea in a new way
+        - Focus on emerging global challenges or opportunities
+
+        The quote should be concise but impactful. Attribute it to a real but not widely known figure, or create a plausible fictional source. Respond only in this JSON format:
+
+        {
+          "quote": "The quote text goes here.",
+          "source": "Name, brief description of who they are"
+        }""",
+
+        """Generate an inspirational quote based on these random elements:
+
+        1. Choose one: [Nature, Technology, Human Relationships, Personal Growth, Social Change]
+        2. Emotion to evoke: [Wonder, Determination, Empathy, Curiosity, Courage]
+        3. Quote length: [Under 10 words, 10-20 words, 20-30 words]
+        4. Source era: [Ancient (pre-1500), Early Modern (1500-1800), Modern (1800-1950), Contemporary (1950-present)]
+        5. Cultural region: [Africa, Asia, Europe, North America, South America, Oceania, Middle East]
+
+        Create a quote that incorporates these elements in an unexpected way. The source should be a real but not famous person from the chosen era and region. Respond only in this JSON format:
+
+        {
+          "quote": "The quote text goes here.",
+          "source": "Name, brief description including their era and cultural background"
+        }"""
+    ]
+
+    chosen_prompt = random.choice(prompts)
+
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": chosen_prompt}]
+        )
+
+        # Extract the response content and clean it up
+        quote_data = completion.choices[0].message.content.strip()
+
+        # Ensure the response is a valid JSON string
+        if quote_data.startswith('```json'):
+            quote_data = quote_data[len('```json'):].strip()
+        if quote_data.endswith('```'):
+            quote_data = quote_data[:-len('```')].strip()
+
+        # Parse the JSON response
+        quote_json = json.loads(quote_data)
+        return quote_json.get("quote", ""), quote_json.get("source", "")
+    except Exception as e:
+        print(f"Error generating quote: {e}")
+        return "An error occurred while generating a quote.", "Error"
 
 def list_files_in_folder(service, folder_id):
     query = f"'{folder_id}' in parents"
