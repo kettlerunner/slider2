@@ -652,19 +652,17 @@ def main():
 
         if file_name in local_metadata:
             local_file_metadata = local_metadata[file_name]
+
+            print(f"Skipping download of unchanged file: {file_name}")
             
-            # Check if the file has the same md5Checksum as the stored metadata
-            if (local_file_metadata['modifiedTime'] == file_metadata['modifiedTime']):
-                print(f"Skipping download of unchanged file: {file_name}")
-                
-                # Try loading the image only if it already exists locally
-                if os.path.exists(file_path):
-                    img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
-                    if img is not None:
-                        if img.shape[2] == 3:
-                            img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
-                        images.append(img)
-                continue
+            # Try loading the image only if it already exists locally
+            if os.path.exists(file_path):
+                img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+                if img is not None:
+                    if img.shape[2] == 3:
+                        img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+                    images.append(img)
+            continue
 
         print(f"Downloading file: {file_name}")
         download_file(service, file['id'], file_path)
