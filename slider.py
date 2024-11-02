@@ -678,7 +678,10 @@ def main():
 
     random.shuffle(images)
 
-    cv2.namedWindow('slideshow', cv2.WINDOW_FREERATIO)
+    # Modify the window creation and properties
+    cv2.namedWindow('slideshow', cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty('slideshow', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
 
     transitions = [
         fade_transition,
