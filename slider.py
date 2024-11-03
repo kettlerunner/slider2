@@ -12,32 +12,8 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
-from openai import OpenAI
 import textwrap
-import re
 from collections import defaultdict
-from svglib.svglib import svg2rlg
-from reportlab.graphics import renderPM
-
-
-def sanitize_text(text):
-    # Replace common problematic characters
-    replacements = {
-        '"': '"',
-        '"': '"',
-        ''': "'",
-        ''': "'",
-        '–': '-',
-        '—': '-',
-        '…': '...'
-    }
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-    
-    # Remove any remaining non-ASCII characters
-    text = re.sub(r'[^\x00-\x7F]+', '', text)
-    
-    return text
 
 # Constants
 frame_width = 800
@@ -46,8 +22,6 @@ transition_time = 2
 display_time = 10
 num_transition_frames = int(transition_time * 30)
 api_key = os.getenv('WEATHERMAP_API_KEY')
-openai_key = os.getenv('OPENAI_API_KEY')
-client = OpenAI(api_key=openai_key)
 
 # If modifying these SCOPES, delete the file token.json.
 SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
@@ -112,38 +86,6 @@ def get_weather_icon(description):
     elif 'windy' in description:
         return icon_images.get('windy')
 
-def get_ai_generated_news():
-    prompt = """
-            Search for current technology, international, business, or economic news relevant to the last week or even today specifically. Dig sources available to you and respond with a compelling title and summary of the news that you are reporting.
-
-            Focus only on current events. Make sure you are pulling events from the past week.
-
-            Respond in JSON format:
-
-            {
-              "headline": "The headline goes here",
-              "summary": "A brief 1-2 sentence summary of the news"
-            }
-        """
-
-    try:
-        completion = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        
-        news_data = completion.choices[0].message.content.strip()
-        if news_data.startswith('```json'):
-            news_data = news_data[len('```json'):].strip()
-        if news_data.endswith('```'):
-            news_data = news_data[:-len('```')].strip()
-        
-        news_json = json.loads(news_data)
-        return news_json
-    except Exception as e:
-        print(f"Error generating news: {e}")
-        return {"headline": "Error generating news", "summary": "Please try again later."}
-
 def add_forecast_overlay(frame, forecast):
     try:
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -202,38 +144,6 @@ def add_forecast_overlay(frame, forecast):
         return frame
     except Exception as e:
         print(f"Error adding forecast overlay: {e}")
-        return frame
-
-def add_news_overlay(frame, news):
-    try:
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.6
-        font_color = (255, 255, 255)
-        thickness = 1
-        
-        # Create a semi-transparent overlay
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (0, frame.shape[0] - 240, frame.shape[1], frame.shape[0]), (50, 50, 50), -1)
-        cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
-        
-        headline = textwrap.wrap(news['headline'], width=60)
-        summary = textwrap.wrap(news['summary'], width=60)
-        y = frame.shape[0] - 220
-        
-        cv2.putText(frame, "News Update:", (10, y), font, font_scale * 1, font_color, thickness, cv2.LINE_AA)
-        y += 30
-        
-        for line in headline:
-            cv2.putText(frame, line, (10, y), font, font_scale, font_color, thickness, cv2.LINE_AA)
-            y += 30
-        
-        for line in summary:
-            cv2.putText(frame, line, (10, y), font, font_scale * 0.8, font_color, thickness, cv2.LINE_AA)
-            y += 25
-        
-        return frame
-    except Exception as e:
-        print(f"Error adding news overlay: {e}")
         return frame
 
 def get_weather_data(api_key, cache_file='weather_cache.json'):
@@ -489,151 +399,6 @@ def add_time_overlay(frame, temp, weather):
         print(f"Error adding overlay: {e}")
         return frame
 
-import json
-import random
-
-def get_random_quote():
-    prompts = [
-        """Generate an uncommon, thought-provoking quote. Draw from a wide range of sources including:
-        - Ancient wisdom traditions
-        - Modern thinkers and innovators
-        - Indigenous cultures
-        - Scientists and researchers
-        - Artists and creatives
-        - Activists and change-makers
-        - Philosophers from various schools of thought
-        - Literary figures from different genres
-
-        Prioritize lesser-known quotes that offer unique perspectives or challenge conventional wisdom. Avoid commonly cited or viral quotes. Respond only with the quote and source in this JSON format:
-
-        {
-          "quote": "The quote text goes here.",
-          "source": "Name, brief description of who they are"
-        }""",
-
-        """Create an inspiring quote that feels fresh and original. Consider these approaches:
-        - Combine ideas from different fields (e.g., science and art, technology and nature)
-        - Use unexpected metaphors or analogies
-        - Offer a counterintuitive perspective
-        - Frame a common idea in a new way
-        - Focus on emerging global challenges or opportunities
-
-        The quote should be concise but impactful. Attribute it to a real but not widely known figure, or create a plausible fictional source. Respond only in this JSON format:
-
-        {
-          "quote": "The quote text goes here.",
-          "source": "Name, brief description of who they are"
-        }""",
-
-        """Generate an inspirational quote based on these random elements:
-
-        1. Choose one: [Nature, Technology, Human Relationships, Personal Growth, Social Change]
-        2. Emotion to evoke: [Wonder, Determination, Empathy, Curiosity, Courage]
-        3. Quote length: [Under 10 words, 10-20 words, 20-30 words]
-        4. Source era: [Ancient (pre-1500), Early Modern (1500-1800), Modern (1800-1950), Contemporary (1950-present)]
-        5. Cultural region: [Africa, Asia, Europe, North America, South America, Oceania, Middle East]
-
-        Create a quote that incorporates these elements in an unexpected way. The source should be a real but not famous person from the chosen era and region. Respond only in this JSON format:
-
-        {
-          "quote": "The quote text goes here.",
-          "source": "Name, brief description including their era and cultural background"
-        }"""
-    ]
-
-    chosen_prompt = random.choice(prompts)
-
-    completion = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "user", "content": chosen_prompt}
-        ]
-    )
-
-    print(completion.choices[0].message.content)
-    try:
-        # Extract the response content and clean it up
-        quote_data = completion.choices[0].message.content.strip()
-        
-        # Ensure the response is a valid JSON string
-        if quote_data.startswith('```json'):
-            quote_data = quote_data[len('```json'):].strip()
-        if quote_data.endswith('```'):
-            quote_data = quote_data[:-len('```')].strip()
-        quote_json = json.loads(quote_data)
-        return quote_json.get("quote", ""), quote_json.get("source", "")
-    except Exception as e:
-        print(f"Error getting quote: {e}")
-        return "", ""
-
-def add_quote_overlay(frame, quote, source):
-    try:
-        # Sanitize the text
-        quote = sanitize_text(quote)
-        source = sanitize_text(source)
-        
-        # Define fonts and scales
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale_quote = 0.8
-        font_scale_source = 0.6
-        font_color = (105, 105, 105)  # Dark gray color
-        thickness = 1
-        
-        # Maximum width for text
-        max_width = frame.shape[1] - 40  # Padding of 20 on each side
-        
-        # Split the quote and source into multiple lines
-        quote_lines = textwrap.wrap(quote, width=50)
-        source_lines = textwrap.wrap(f"- {source}", width=50)
-        
-        # Calculate text size and total height
-        text_height = 0
-        line_height_quote = cv2.getTextSize("Test", font, font_scale_quote, thickness)[0][1]
-        line_height_source = cv2.getTextSize("Test", font, font_scale_source, thickness)[0][1]
-        
-        text_height += line_height_quote * len(quote_lines)
-        text_height += line_height_source * len(source_lines)
-        text_height += 20  # Additional padding between quote and source
-
-        # Determine the width of the box
-        max_line_width = max(
-            [cv2.getTextSize(line, font, font_scale_quote, thickness)[0][0] for line in quote_lines] +
-            [cv2.getTextSize(line, font, font_scale_source, thickness)[0][0] for line in source_lines]
-        )
-
-        # Box dimensions
-        box_width = max_line_width + 40  # Adding padding
-        box_height = text_height + 80  # Adding padding
-        box_x = (frame.shape[1] - box_width) // 2
-        box_y = (frame.shape[0] - box_height) // 2
-
-        # Draw the semi-transparent box
-        overlay_frame = frame.copy()
-        cv2.rectangle(overlay_frame, (box_x, box_y), (box_x + box_width, box_y + box_height), (255, 255, 255), -1)
-        alpha = 0.8  # Transparency factor
-        cv2.addWeighted(overlay_frame, alpha, frame, 1 - alpha, 0, overlay_frame)
-
-        # Draw each line of the quote
-        y = box_y + 20  # Padding inside the box
-        for line in quote_lines:
-            text_size, _ = cv2.getTextSize(line, font, font_scale_quote, thickness)
-            x = (frame.shape[1] - text_size[0]) // 2  # Center the text horizontally
-            cv2.putText(overlay_frame, line, (x, y + text_size[1]), font, font_scale_quote, font_color, thickness, cv2.LINE_AA)
-            y += text_size[1] + 10  # Line height + padding
-
-        # Draw each line of the source
-        y += 10  # Additional padding before the source
-        for line in source_lines:
-            text_size, _ = cv2.getTextSize(line, font, font_scale_source, thickness)
-            x = (frame.shape[1] - text_size[0]) // 2  # Center the text horizontally
-            cv2.putText(overlay_frame, line, (x, y + text_size[1]), font, font_scale_source, font_color, thickness, cv2.LINE_AA)
-            y += text_size[1] + 10  # Line height + padding
-
-        return overlay_frame
-    except Exception as e:
-        print(f"Error adding quote overlay: {e}")
-        return frame
-        
 def load_local_metadata(metadata_file):
     if os.path.exists(metadata_file):
         with open(metadata_file, 'r') as f:
@@ -713,24 +478,16 @@ def main():
     index = 0
     current_img = resize_and_pad(images[index], frame_width, frame_height)
     forecast = get_weather_forecast(api_key)
-    #news = get_ai_generated_news()
     while True:
         temp, weather = get_weather_data(api_key)
         
-        # Randomly choose display type: single image, stitched images, or quote
-        #display_type = random.choice(["single", "stitch", "quote", "forecast"])
-
+        # Randomly choose display type: single image, stitched images, or forecast
         display_type = random.choice(["single", "stitch", "forecast"])
         
         if display_type == "forecast":
             single_image = images[(index + 1) % len(images)]
             next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
             next_img = add_forecast_overlay(next_img, forecast)
-        elif display_type == "news":
-            single_image = images[(index + 1) % len(images)]
-            next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
-            news = get_ai_generated_news()
-            next_img = add_news_overlay(next_img, news)
         elif display_type == "stitch":
             stitch_count = random.randint(2, 4)
             stitch_indices = random.sample(range(len(images)), stitch_count)
@@ -738,16 +495,11 @@ def main():
             next_img = stitch_images(stitched_images, frame_width, frame_height)
             if next_img.shape[2] == 4:
                 next_img = cv2.cvtColor(next_img, cv2.COLOR_BGRA2BGR)
-        elif display_type == "quote":
-            single_image = images[(index + 1) % len(images)]
-            next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
-            quote, source = get_random_quote()
-            next_img = add_quote_overlay(next_img, quote, source)
         else:
             single_image = images[(index + 1) % len(images)]
             next_img = create_single_image_with_background(single_image, frame_width, frame_height)
         
-        # Update forecast and news periodically (e.g., every hour)
+        # Update forecast periodically (e.g., every hour)
         if datetime.now().minute == 0:
             forecast = get_weather_forecast(api_key)
 
