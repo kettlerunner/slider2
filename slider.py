@@ -48,6 +48,8 @@ num_transition_frames = int(transition_time * 30)
 api_key = os.getenv('WEATHERMAP_API_KEY')
 openai_key = os.getenv('OPENAI_API_KEY')
 client = OpenAI(api_key=openai_key)
+face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
+cap = cv2.VideoCapture(0)
 
 # If modifying these SCOPES, delete the file token.json.
 SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
@@ -123,6 +125,29 @@ def get_ai_generated_news():
     except Exception as e:
         print(f"Error generating news: {e}")
         return {"headline": "Error generating news", "summary": "Please try again later."}
+
+def add_camera_feed(frame, cam_frame, faces, position=(0, 0), size=(200, 150)):
+    if len(faces) > 0:
+        x, y = position
+        width, height = size
+        small_cam_frame = cv2.resize(cam_frame, (width, height))
+
+        # Ensure frame and small_cam_frame have the same number of channels
+        if frame.shape[2] != small_cam_frame.shape[2]:
+            if frame.shape[2] == 4 and small_cam_frame.shape[2] == 3:
+                small_cam_frame = cv2.cvtColor(small_cam_frame, cv2.COLOR_BGR2BGRA)
+            elif frame.shape[2] == 3 and small_cam_frame.shape[2] == 4:
+                small_cam_frame = cv2.cvtColor(small_cam_frame, cv2.COLOR_BGRA2BGR)
+
+        h, w = small_cam_frame.shape[:2]
+
+        # Check if the overlay position is within the frame boundaries
+        if y + h > frame.shape[0] or x + w > frame.shape[1]:
+            print("Overlay position out of frame bounds")
+            return frame
+
+        frame[y:y+h, x:x+w] = small_cam_frame
+    return frame
 
 def add_forecast_overlay(frame, forecast):
     try:
@@ -745,8 +770,16 @@ def main():
                 exit()
 
         frame_with_overlay = add_time_overlay(next_img, temp, weather)
+        # Capture camera frame and detect faces
+        ret, cam_frame = cap.read()
+        if ret:
+            gray = cv2.cvtColor(cam_frame, cv2.COLOR_BGR2GRAY)
+            faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+            if len(faces) > 0:
+                frame_with_overlay = add_camera_feed(frame_with_overlay, cam_frame, faces, position=(0, 0), size=(200, 150))
         cv2.imshow('slideshow', frame_with_overlay)
         if cv2.waitKey(display_time * 1000) == ord('q'):
+            cap.release()
             cv2.destroyAllWindows()
             exit()
 
