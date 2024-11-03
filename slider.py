@@ -713,14 +713,12 @@ def main():
     index = 0
     current_img = resize_and_pad(images[index], frame_width, frame_height)
     forecast = get_weather_forecast(api_key)
-    news = get_ai_generated_news()
+    #news = get_ai_generated_news()
     while True:
         temp, weather = get_weather_data(api_key)
         
         # Randomly choose display type: single image, stitched images, or quote
-        #display_type = random.choice(["single", "stitch", "quote", "forecast"]) "I'm going to take the quote out of this for now. it seems to be causeing errors.
-
-        display_type = random.choice(["single", "stitch", "forecast"])
+        display_type = random.choice(["single", "stitch", "quote", "forecast"]) "I'm going to take the quote out of this for now. it seems to be causeing errors.
         
         if display_type == "forecast":
             single_image = images[(index + 1) % len(images)]
