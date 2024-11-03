@@ -92,6 +92,26 @@ def get_weather_forecast(api_key, city="Waupun", country_code="US"):
         print("Error fetching weather forecast data")
         return None
 
+icon_images = {
+    'clear': cv2.imread('icons/sunny.png', cv2.IMREAD_UNCHANGED),
+    'cloudy': cv2.imread('icons/cloudy.png', cv2.IMREAD_UNCHANGED),
+    'rain': cv2.imread('icons/rain.png', cv2.IMREAD_UNCHANGED),
+    'snow': cv2.imread('icons/snow.png', cv2.IMREAD_UNCHANGED),
+    'windy': cv2.imread('icons/windy.png', cv2.IMREAD_UNCHANGED)
+}
+
+def get_weather_icon(description):
+    """Return the appropriate icon image based on the weather description."""
+    description = description.lower()
+    if 'clear' in description:
+        return icon_images.get('clear')
+    elif 'cloud' in description:
+        return icon_images.get('cloudy')
+    elif 'rain' in description:
+        return icon_images.get('rain')
+    elif 'windy' in description:
+        return icon_images.get('windy')
+
 def get_ai_generated_news():
     prompt = """
             Search for current technology, international, business, or economic news relevant to the last week or even today specifically. Dig sources available to you and respond with a compelling title and summary of the news that you are reporting.
@@ -130,15 +150,15 @@ def add_forecast_overlay(frame, forecast):
         font_scale = 0.5
         font_color = (255, 255, 255)
         thickness = 1
-        
+
         # Create a semi-transparent overlay
         overlay = frame.copy()
         cv2.rectangle(overlay, (0, 0), (frame.shape[1], 200), (50, 50, 50), -1)
         cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
-        
+
         # Title
         cv2.putText(frame, "5-Day Forecast", (10, 30), font, 0.8, font_color, 2, cv2.LINE_AA)
-        
+
         if forecast:
             col_width = frame.shape[1] // 5
             for i, day in enumerate(forecast):
@@ -150,20 +170,32 @@ def add_forecast_overlay(frame, forecast):
                 y += 25
                 cv2.putText(frame, day['date'].split(',')[1].strip(), (x, y), font, font_scale, font_color, thickness, cv2.LINE_AA)
                 y += 35
-                
+
                 # Temperature range
                 temp_text = f"{day['temp_min']:.1f} - {day['temp_max']:.1f} F"
                 cv2.putText(frame, temp_text, (x, y), font, font_scale, font_color, thickness, cv2.LINE_AA)
                 y += 35
-                
-                # Weather icon (text representation)
-                icon = get_weather_icon(day['description'])
-                cv2.putText(frame, icon, (x+15, y), font, font_scale, font_color, thickness, cv2.LINE_AA)
-                y += 30
-                
+
+                # Weather icon overlay
+                icon_img = get_weather_icon(day['description'])
+                if icon_img is not None:
+                    icon_size = 32  # Icon size, adjust as needed
+                    icon_img = cv2.resize(icon_img, (icon_size, icon_size))
+                    icon_y_offset = y - 20  # Position adjustment
+                    icon_x_offset = x + 10
+                    y += 40
+
+                    # Check if icon has transparency (alpha channel)
+                    if icon_img.shape[2] == 4:
+                        for c in range(3):  # Apply BGR channels
+                            frame[icon_y_offset:icon_y_offset+icon_size, icon_x_offset:icon_x_offset+icon_size, c] = \
+                                icon_img[:, :, c] * (icon_img[:, :, 3] / 255.0) + frame[icon_y_offset:icon_y_offset+icon_size, icon_x_offset:icon_x_offset+icon_size, c] * (1 - icon_img[:, :, 3] / 255.0)
+                    else:
+                        frame[icon_y_offset:icon_y_offset+icon_size, icon_x_offset:icon_x_offset+icon_size] = icon_img
+
                 # Description
                 desc = day['description']
-                cv2.putText(frame, desc, (x, y), font, font_scale*0.8, font_color, thickness, cv2.LINE_AA)
+                cv2.putText(frame, desc, (x, y), font, font_scale * 0.8, font_color, thickness, cv2.LINE_AA)
         else:
             cv2.putText(frame, "Forecast data unavailable", (10, 100), font, font_scale, font_color, thickness, cv2.LINE_AA)
         
@@ -171,19 +203,6 @@ def add_forecast_overlay(frame, forecast):
     except Exception as e:
         print(f"Error adding forecast overlay: {e}")
         return frame
-
-def get_weather_icon(description):
-    if 'clear' in description.lower():
-        return '☀️'
-    elif 'cloud' in description.lower():
-        return '☁️'
-    elif 'rain' in description.lower():
-        return '🌧️'
-    elif 'snow' in description.lower():
-        return '❄️'
-    else:
-        return '🌤️'
-
 
 def add_news_overlay(frame, news):
     try:
