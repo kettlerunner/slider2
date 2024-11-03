@@ -718,7 +718,7 @@ def main():
         temp, weather = get_weather_data(api_key)
         
         # Randomly choose display type: single image, stitched images, or quote
-        display_type = random.choice(["single", "stitch", "quote", "forecast"]) "I'm going to take the quote out of this for now. it seems to be causeing errors.
+        display_type = random.choice(["single", "stitch", "quote", "forecast"])
         
         if display_type == "forecast":
             single_image = images[(index + 1) % len(images)]
