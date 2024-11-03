@@ -1,4 +1,3 @@
-from __future__ import print_function
 import os
 import io
 import json
@@ -14,13 +13,14 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 import textwrap
 from collections import defaultdict
+import gc
 
 # Constants
 frame_width = 800
 frame_height = 480
 transition_time = 2
 display_time = 10
-num_transition_frames = int(transition_time * 30)
+num_transition_frames = int(transition_time * 15)  # Reduced from 30 to 15
 api_key = os.getenv('WEATHERMAP_API_KEY')
 
 # If modifying these SCOPES, delete the file token.json.
@@ -202,7 +202,7 @@ def resize_and_pad(image, width, height):
     has_alpha = image.shape[2] == 4
     if has_alpha:
         padded_image = np.zeros((height, width, 4), dtype=np.uint8)
-        padded_image[:,:,3] = 0
+        padded_image[:, :, 3] = 0
     else:
         padded_image = np.zeros((height, width, 3), dtype=np.uint8)
 
@@ -210,12 +210,12 @@ def resize_and_pad(image, width, height):
     left_pad = (width - resized_image.shape[1]) // 2
 
     if has_alpha:
-        padded_image[top_pad:top_pad+resized_image.shape[0], 
+        padded_image[top_pad:top_pad+resized_image.shape[0],
                      left_pad:left_pad+resized_image.shape[1], :] = resized_image
     else:
-        padded_image[top_pad:top_pad+resized_image.shape[0], 
+        padded_image[top_pad:top_pad+resized_image.shape[0],
                      left_pad:left_pad+resized_image.shape[1], :] = resized_image
-        
+
     return padded_image
 
 def create_zoomed_blurred_background(image, width, height):
@@ -322,8 +322,8 @@ def stitch_images(images, width, height):
         
         if resized_image.shape[2] == 4:
             rgb_image = cv2.cvtColor(resized_image, cv2.COLOR_BGRA2BGR)
-            alpha = resized_image[:,:,3] / 255.0
-            alpha = np.repeat(alpha[:,:,np.newaxis], 3, axis=2)
+            alpha = resized_image[:, :, 3] / 255.0
+            alpha = np.repeat(alpha[:, :, np.newaxis], 3, axis=2)
             stitched_image[start_y:start_y+grid_height, start_x:start_x+grid_width] = \
                 (1-alpha) * stitched_image[start_y:start_y+grid_height, start_x:start_x+grid_width] + \
                 alpha * rgb_image
@@ -346,8 +346,8 @@ def create_single_image_with_background(image, width, height):
 
     if resized_image.shape[2] == 4:
         rgb_image = cv2.cvtColor(resized_image, cv2.COLOR_BGRA2BGR)
-        alpha = resized_image[:,:,3] / 255.0
-        alpha = np.repeat(alpha[:,:,np.newaxis], 3, axis=2)
+        alpha = resized_image[:, :, 3] / 255.0
+        alpha = np.repeat(alpha[:, :, np.newaxis], 3, axis=2)
         background = blurred_background[top_pad:top_pad+resized_image.shape[0], left_pad:left_pad+resized_image.shape[1]]
         combined = (1-alpha) * background + alpha * rgb_image
         blurred_background[top_pad:top_pad+resized_image.shape[0], left_pad:left_pad+resized_image.shape[1]] = combined
@@ -409,6 +409,14 @@ def save_local_metadata(metadata_file, metadata):
     with open(metadata_file, 'w') as f:
         json.dump(metadata, f)
 
+def load_and_process_image(path):
+    img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if img is not None:
+        img = resize_and_pad(img, frame_width, frame_height)
+        if img.shape[2] == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+    return img
+
 def main():
     service = authenticate_drive()
 
@@ -422,7 +430,7 @@ def main():
     metadata_file = 'metadata.json'
     local_metadata = load_local_metadata(metadata_file)
 
-    images = []
+    image_paths = []
     for file in files:
         file_name = file['name']
         file_path = os.path.join(temp_dir, file_name)
@@ -437,35 +445,25 @@ def main():
             if (local_file_metadata['modifiedTime'] == file_metadata['modifiedTime'] and
                 local_file_metadata['size'] == file_metadata['size']):
                 print(f"Skipping download of unchanged file: {file_name}")
-                img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
-                if img is not None:
-                    if img.shape[2] == 3:
-                        img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
-                    images.append(img)
+                image_paths.append(file_path)
                 continue
 
         print(f"Downloading file: {file_name}")
         download_file(service, file['id'], file_path)
-        img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
-        if img is not None:
-            if img.shape[2] == 3:
-                img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
-            images.append(img)
+        image_paths.append(file_path)
 
         local_metadata[file_name] = file_metadata
 
     save_local_metadata(metadata_file, local_metadata)
 
-    if not images:
+    if not image_paths:
         print("No images found in the folder.")
         exit()
 
-    random.shuffle(images)
+    random.shuffle(image_paths)
 
-    # Modify the window creation and properties
     cv2.namedWindow('slideshow', cv2.WINDOW_NORMAL)
     cv2.setWindowProperty('slideshow', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-
 
     transitions = [
         fade_transition,
@@ -476,8 +474,9 @@ def main():
     ]
 
     index = 0
-    current_img = resize_and_pad(images[index], frame_width, frame_height)
+    current_img = load_and_process_image(image_paths[index])
     forecast = get_weather_forecast(api_key)
+
     while True:
         temp, weather = get_weather_data(api_key)
         
@@ -485,19 +484,25 @@ def main():
         display_type = random.choice(["single", "stitch", "forecast"])
         
         if display_type == "forecast":
-            single_image = images[(index + 1) % len(images)]
+            single_image = load_and_process_image(image_paths[(index + 1) % len(image_paths)])
             next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
             next_img = add_forecast_overlay(next_img, forecast)
+            del single_image
         elif display_type == "stitch":
             stitch_count = random.randint(2, 4)
-            stitch_indices = random.sample(range(len(images)), stitch_count)
-            stitched_images = [images[i] for i in stitch_indices]
+            stitch_indices = random.sample(range(len(image_paths)), stitch_count)
+            stitched_images = [load_and_process_image(image_paths[i]) for i in stitch_indices]
             next_img = stitch_images(stitched_images, frame_width, frame_height)
             if next_img.shape[2] == 4:
                 next_img = cv2.cvtColor(next_img, cv2.COLOR_BGRA2BGR)
+            # Release stitched images from memory
+            for img in stitched_images:
+                del img
+            del stitched_images
         else:
-            single_image = images[(index + 1) % len(images)]
+            single_image = load_and_process_image(image_paths[(index + 1) % len(image_paths)])
             next_img = create_single_image_with_background(single_image, frame_width, frame_height)
+            del single_image
         
         # Update forecast periodically (e.g., every hour)
         if datetime.now().minute == 0:
@@ -523,8 +528,12 @@ def main():
             cv2.destroyAllWindows()
             exit()
 
+        # Release current image from memory
+        del current_img
+        gc.collect()
+
         current_img = next_img
-        index = (index + 1) % len(images)
+        index = (index + 1) % len(image_paths)
 
 if __name__ == '__main__':
     main()
