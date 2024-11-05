@@ -644,6 +644,15 @@ def save_local_metadata(metadata_file, metadata):
     with open(metadata_file, 'w') as f:
         json.dump(metadata, f)
 
+def get_light_level(cap):
+    ret, frame = cap.read()
+    if ret:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        avg_brightness = np.mean(gray)
+        return avg_brightness
+    else:
+        return None
+
 def main():
     service = authenticate_drive()
 
@@ -656,6 +665,12 @@ def main():
 
     metadata_file = 'metadata.json'
     local_metadata = load_local_metadata(metadata_file)
+
+    LIGHT_THRESHOLD = 50  # Adjust this value as needed
+    cap = cv2.VideoCapture(0)  # 0 is the default camera index
+    if not cap.isOpened():
+        print("Error: Could not open camera.")
+        return
 
     images = []
     for file in files:
@@ -715,7 +730,18 @@ def main():
     forecast = get_weather_forecast(api_key)
     #news = get_ai_generated_news()
     while True:
+        
         temp, weather = get_weather_data(api_key)
+
+           # Check the ambient light level
+        light_level = get_light_level(cap)
+        if light_level is not None and light_level < LIGHT_THRESHOLD:
+            # Lights are off or low, display a black screen
+            black_frame = np.zeros((frame_height, frame_width, 3), dtype=np.uint8)
+            cv2.imshow('slideshow', black_frame)
+            if cv2.waitKey(1000) == ord('q'):
+                break
+            continue  # Skip the rest and check light level again
         
         # Randomly choose display type: single image, stitched images, or quote
         display_type = random.choice(["single", "stitch", "quote", "forecast"])
@@ -773,4 +799,8 @@ def main():
         index = (index + 1) % len(images)
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
