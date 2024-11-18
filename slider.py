@@ -179,7 +179,7 @@ def add_forecast_overlay(frame, forecast):
                 # Weather icon overlay
                 icon_img = get_weather_icon(day['description'])
                 if icon_img is not None:
-                    icon_size = 32  # Icon size, adjust as needed
+                    icon_size = 64  # Icon size, adjust as needed
                     icon_img = cv2.resize(icon_img, (icon_size, icon_size))
                     icon_y_offset = y - 20  # Position adjustment
                     icon_x_offset = x + 10
