@@ -729,7 +729,7 @@ def main():
             local_file_metadata = local_metadata[file_name]
             if (local_file_metadata['modifiedTime'] == file_metadata['modifiedTime'] and
                 local_file_metadata['size'] == file_metadata['size']):
-                print(f"Skipping download of unchanged file: {file_name}")
+                #print(f"Skipping download of unchanged file: {file_name}")
                 img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
                 if img is not None:
                     if img.shape[2] == 3:
