@@ -77,38 +77,65 @@ def get_weather_forecast2(api_key, city="Waupun", country_code="US"):
         print("Error fetching weather data.")
         return []
 
-def get_tldr_forecast(weather_data):
-    """Sends weather data to OpenAI for a TL;DR conversational summary."""
+def get_tldr_forecast(weather_data, style="random"):
     # Format the weather data into a natural language description
     formatted_data = "\n".join(
         f"Time: {item['time']}, Temp: {item['temp']}°F, Description: {item['description']}, "
         f"Wind Speed: {item['wind_speed']} mph, Humidity: {item['humidity']}%"
         for item in weather_data
     )
-    
+
+    styles = [
+        "poem",
+        "snoop_dogg",
+        "abe_lincoln",
+        "shakespeare",
+        "pirate",
+        "haiku",
+        "yoda",
+        "robot",
+        "cowboy",
+        "villain",
+        "zen_master",
+    ]
+
+    if style == "random":
+        style = random.choice(styles)
+
+    style_prompts = {
+        "poem": "Turn the weather forecast into a short whimsical poem. Be concise.",
+        "snoop_dogg": "Summarize the weather in the style of Snoop Dogg. Keep it cool, funky, and very short.",
+        "abe_lincoln": "Summarize the weather as if it were spoken by Abraham Lincoln in a thoughtful speech. Very short. TLDR style.",
+        "shakespeare": "Rewrite the weather forecast in the style of William Shakespeare, with old English flair. Very short, TLDR.",
+        "pirate": "Describe the weather as if you're a pirate at sea. Arrr, matey! Keep it short, TLDR.",
+        "haiku": "Write the weather forecast as a short haiku. Minimal and poetic.",
+        "yoda": "Summarize the weather in the voice of Yoda. Wise, you must be. Short, it should be.",
+        "robot": "Describe the weather as a robot would. Short and systematic.",
+        "cowboy": "Summarize the weather like an old cowboy talking to his horse. Keep it short and rugged.",
+        "villain": "Summarize the weather as a dramatic villain plotting world domination. Keep it short and diabolical.",
+        "zen_master": "Summarize the weather like a Zen master sharing wisdom. Be very concise, yet profound.",
+    }
+
     prompt = f"""
-        Here is the weather forecast for today:
-        
-        {formatted_data}
-        
-        Summarize this into a conversational, super short TLDR forecast for the rest of the day. 
-        """
-    
-        
-    
+    Here is the weather forecast for today:
+
+    {formatted_data}
+
+    {style_prompts.get(style, "Summarize this into a conversational, super short forecast.")}
+    """
+
     completion = client.chat.completions.create(
         model="gpt-4o",
         messages=[
             {"role": "user", "content": prompt}
         ]
     )
-    
- 
+
     try:
         return completion.choices[0].message.content.strip()
     except Exception as e:
         print(f"Error generating forecast summary: {e}")
-        return "Could not generate forecast summary."
+        return f"Could not generate forecast summary in {style} style."
 
 def get_weather_forecast(api_key, city="Waupun", country_code="US"):
     url = f"http://api.openweathermap.org/data/2.5/forecast?q={city},{country_code}&units=imperial&appid={api_key}"
@@ -646,8 +673,8 @@ def add_quote_overlay(frame, quote, source):
         
         # Calculate text size and total height
         text_height = 0
-        line_height_quote = cv2.getTextSize("Test", font, font_scale_quote, thickness)[0][1]
-        line_height_source = cv2.getTextSize("Test", font, font_scale_source, thickness)[0][1]
+        line_height_quote = cv2.getTextSize("Test", font, font_scale_quote*1.3, thickness)[0][1]
+        line_height_source = cv2.getTextSize("Test", font, font_scale_source*1.3, thickness)[0][1]
         
         text_height += line_height_quote * len(quote_lines)
         text_height += line_height_source * len(source_lines)
