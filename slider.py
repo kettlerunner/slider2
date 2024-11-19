@@ -52,6 +52,64 @@ client = OpenAI(api_key=openai_key)
 # If modifying these SCOPES, delete the file token.json.
 SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 
+def get_weather_forecast2(api_key, city="Waupun", country_code="US"):
+    """Fetches the weather forecast for the day from OpenWeatherMap API."""
+    url = f"http://api.openweathermap.org/data/2.5/forecast?q={city},{country_code}&units=imperial&appid={api_key}"
+    response = requests.get(url)
+    
+    if response.status_code == 200:
+        data = response.json()
+        today = datetime.now().strftime("%Y-%m-%d")
+        today_weather = []
+        
+        for item in data['list']:
+            dt = datetime.fromtimestamp(item['dt'])
+            if dt.strftime("%Y-%m-%d") == today:
+                today_weather.append({
+                    "time": dt.strftime("%I:%M %p"),
+                    "temp": item['main']['temp'],
+                    "description": item['weather'][0]['description'],
+                    "wind_speed": item['wind']['speed'],
+                    "humidity": item['main']['humidity']
+                })
+        return today_weather
+    else:
+        print("Error fetching weather data.")
+        return []
+
+def get_tldr_forecast(weather_data):
+    """Sends weather data to OpenAI for a TL;DR conversational summary."""
+    # Format the weather data into a natural language description
+    formatted_data = "\n".join(
+        f"Time: {item['time']}, Temp: {item['temp']}°F, Description: {item['description']}, "
+        f"Wind Speed: {item['wind_speed']} mph, Humidity: {item['humidity']}%"
+        for item in weather_data
+    )
+    
+    prompt = f"""
+        Here is the weather forecast for today:
+        
+        {formatted_data}
+        
+        Summarize this into a conversational, super short TLDR forecast for the rest of the day. 
+        """
+    
+        
+    
+    completion = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "user", "content": prompt}
+        ]
+    )
+    
+ 
+    try:
+        return completion.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"Error generating forecast summary: {e}")
+        return "Could not generate forecast summary."
+
 def get_weather_forecast(api_key, city="Waupun", country_code="US"):
     url = f"http://api.openweathermap.org/data/2.5/forecast?q={city},{country_code}&units=imperial&appid={api_key}"
     response = requests.get(url)
@@ -741,6 +799,23 @@ def main():
             next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
             quote, source = get_random_quote()
             next_img = add_quote_overlay(next_img, quote, source)
+        elif display_type == "today":
+            single_image = images[(index + 1) % len(images)]
+            next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
+            
+            city = "Waupun"
+            country_code = "US"
+        
+            # Step 1: Fetch Weather Data
+            weather_data = get_weather_forecast2(api_key, city, country_code)
+            
+            # Step 2: Generate TL;DR Summary
+            if weather_data:
+                forecast_summary = get_tldr_forecast(weather_data)
+            else:
+                print("No weather data available.")
+
+            next_img = add_quote_overlay(next_img, forecast_summary, "Today's Weather")
         else:
             single_image = images[(index + 1) % len(images)]
             next_img = create_single_image_with_background(single_image, frame_width, frame_height)
