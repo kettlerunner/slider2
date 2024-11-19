@@ -153,7 +153,7 @@ def add_forecast_overlay(frame, forecast):
 
         # Create a semi-transparent overlay
         overlay = frame.copy()
-        cv2.rectangle(overlay, (0, 0), (frame.shape[1], 200), (50, 50, 50), -1)
+        cv2.rectangle(overlay, (0, 0), (frame.shape[1], 224), (50, 50, 50), -1)
         cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
 
         # Title
@@ -183,7 +183,7 @@ def add_forecast_overlay(frame, forecast):
                     icon_img = cv2.resize(icon_img, (icon_size, icon_size))
                     icon_y_offset = y - 20  # Position adjustment
                     icon_x_offset = x + 10
-                    y += 40
+                    y += 64
 
                     # Check if icon has transparency (alpha channel)
                     if icon_img.shape[2] == 4:
