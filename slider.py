@@ -195,7 +195,7 @@ def add_forecast_overlay(frame, forecast):
 
                 # Description
                 desc = day['description']
-                cv2.putText(frame, desc, (x, y), font, font_scale * 0.8, font_color, thickness, cv2.LINE_AA)
+                cv2.putText(frame, desc, (x, y), font, font_scale * 0.9, font_color, thickness, cv2.LINE_AA)
         else:
             cv2.putText(frame, "Forecast data unavailable", (10, 100), font, font_scale, font_color, thickness, cv2.LINE_AA)
         
