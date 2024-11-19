@@ -240,7 +240,7 @@ def add_forecast_overlay(frame, forecast):
                     icon_size = 64  # Icon size, adjust as needed
                     icon_img = cv2.resize(icon_img, (icon_size, icon_size))
                     icon_y_offset = y - 20  # Position adjustment
-                    icon_x_offset = x + 10
+                    icon_x_offset = x + 20
                     y += 64
 
                     # Check if icon has transparency (alpha channel)
