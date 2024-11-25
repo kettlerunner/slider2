@@ -194,6 +194,8 @@ def get_weather_icon(description):
         return icon_images.get('rain')
     elif 'windy' in description:
         return icon_images.get('windy')
+    elif 'snow' in description:
+        return icon_images.get('snow')
 
 def get_ai_generated_news():
     prompt = """
