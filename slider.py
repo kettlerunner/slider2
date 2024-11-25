@@ -43,7 +43,7 @@ def sanitize_text(text):
 frame_width = 800
 frame_height = 480
 transition_time = 2
-display_time = 10
+display_time = 20
 num_transition_frames = int(transition_time * 30)
 api_key = os.getenv('WEATHERMAP_API_KEY')
 openai_key = os.getenv('OPENAI_API_KEY')
