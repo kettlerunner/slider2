@@ -560,6 +560,101 @@ def wave_transition(current_img, next_img, num_frames):
 
         yield frame.astype(np.uint8)
 
+def zen_ripple_transition(current_img, next_img, num_frames):
+    current_img, next_img = ensure_same_channels(current_img, next_img)
+    height, width = current_img.shape[:2]
+    
+    # Compute center point of the frame
+    center_x, center_y = width // 2, height // 2
+
+    # The ripple radius will expand from 0 to the diagonal distance
+    # so that it eventually covers the entire frame.
+    max_radius = np.sqrt((width / 2)**2 + (height / 2)**2)
+
+    # A helper function for smooth blending
+    # smoothstep: maps t from 0-1 to a smoother 0-1 curve
+    # smoothstep(t) = 3t² - 2t³
+    def smoothstep(t):
+        return 3 * t**2 - 2 * t**3
+
+    # Precompute coordinates and distances to center
+    # for efficiency
+    ys, xs = np.indices((height, width))
+    distances = np.sqrt((xs - center_x)**2 + (ys - center_y)**2)
+
+    for i in range(num_frames):
+        alpha = i / num_frames
+        
+        # Current radius of the ripple
+        radius = alpha * max_radius
+
+        # We'll define a thin blend region around the radius boundary.
+        # For example, blend smoothly over 10 pixels inward and outward.
+        blend_region = 10
+        # The blending factor for each pixel:
+        # - Pixels with distance < radius - blend_region are fully next_img
+        # - Pixels with distance > radius + blend_region are fully current_img
+        # - Within radius ± blend_region, smooth blend between images
+        lower_bound = radius - blend_region
+        upper_bound = radius + blend_region
+
+        frame = current_img.astype(np.float32).copy()
+        # Extract both images as float32 for blending
+        curr_float = current_img.astype(np.float32)
+        next_float = next_img.astype(np.float32)
+
+        # Create a mask for blending
+        # normalized_dist calculates how far we are into the blend region
+        # and apply smoothstep.
+        # If distance < lower_bound: factor = 1.0 (fully next image)
+        # If distance > upper_bound: factor = 0.0 (fully current image)
+        # Between bounds: smoothly transition
+        factor = np.zeros_like(distances, dtype=np.float32)
+        inside = distances < lower_bound
+        outside = distances > upper_bound
+        blend_zone = ~inside & ~outside
+
+        factor[inside] = 1.0
+        # Normalize blend zone distances to [0,1]
+        # so that at lower_bound factor=1, at upper_bound factor=0
+        blend_zone_dist = (distances[blend_zone] - lower_bound) / (upper_bound - lower_bound)
+        # Invert because we want factor=1 at inner edge and factor=0 at outer
+        blend_zone_factor = 1.0 - blend_zone_dist
+        # Apply smoothstep for a gentle transition
+        blend_zone_factor = smoothstep(blend_zone_factor)
+        factor[blend_zone] = blend_zone_factor
+        factor[outside] = 0.0
+
+        # Now blend images using factor:
+        # factor=1 means next_img
+        # factor=0 means current_img
+        # factor in between means a mix.
+        # factor needs to be broadcast for channel arithmetic if BGRA
+        if frame.shape[2] == 4:
+            # Separate alpha channels if needed
+            alpha_c = frame[:,:,3]
+            curr_rgb = curr_float[:,:,0:3]
+            next_rgb = next_float[:,:,0:3]
+
+            # Expand factor to 3 channels for RGB
+            factor_3c = factor[:,:,np.newaxis]
+            blended_rgb = curr_rgb * (1 - factor_3c) + next_rgb * factor_3c
+            # Keep the alpha channel from current or next (or just max)
+            # For simplicity, just keep current alpha as is, or max.
+            # If you want a fade in alpha, factor that too, or just set it solid.
+            blended_a = np.maximum(alpha_c, 255).astype(np.float32)
+            
+            frame[:,:,0:3] = blended_rgb
+            frame[:,:,3] = blended_a
+        else:
+            # 3-channel (BGR)
+            factor_3c = factor[:,:,np.newaxis]
+            blended = curr_float * (1 - factor_3c) + next_float * factor_3c
+            frame = blended
+
+        yield frame.astype(np.uint8)
+
+
 def stitch_images(images, width, height):
     num_images = len(images)
     
@@ -900,7 +995,8 @@ def main():
         wipe_transition_top,
         wipe_transition_bottom,
         melt_transition,
-        wave_transition
+        wave_transition,
+        zen_ripple_transition
     ]
 
     index = 0
