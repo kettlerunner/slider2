@@ -461,6 +461,41 @@ def wipe_transition_bottom(current_img, next_img, num_frames):
         frame[:dy, :] = next_img[current_img.shape[0]-dy:, :]
         yield frame
 
+def melt_transition(current_img, next_img, num_frames):
+    current_img, next_img = ensure_same_channels(current_img, next_img)
+    height, width = current_img.shape[:2]
+
+    max_shift = int(height * 0.5)
+    
+    for i in range(num_frames):
+        alpha = i / num_frames
+        frame = next_img.copy()
+        
+        for r in range(height):
+            shift = int(alpha * max_shift)
+            new_r = r + shift
+            if new_r < height:
+                row_alpha = 1 - alpha
+                curr_row = current_img[r, :, :]
+                
+                if curr_row.shape[1] == 4:
+                    curr_bgr = curr_row[:, :3].astype(np.float32)
+                    curr_a = curr_row[:, 3] / 255.0
+                    # Reshape curr_a to (width, 1) for broadcasting
+                    curr_a = curr_a[:, np.newaxis]
+
+                    base = frame[new_r, :, :3].astype(np.float32)
+                    out_bgr = curr_bgr * curr_a * row_alpha + base * (1 - curr_a * row_alpha)
+                    frame[new_r, :, :3] = out_bgr.astype(np.uint8)
+                else:
+                    # Without alpha, just blend linearly
+                    curr_bgr = curr_row[:, :3].astype(np.float32)
+                    base = frame[new_r, :, :3].astype(np.float32)
+                    out_bgr = base * (1 - row_alpha) + curr_bgr * row_alpha
+                    frame[new_r, :, :3] = out_bgr.astype(np.uint8)
+
+        yield frame
+
 def stitch_images(images, width, height):
     num_images = len(images)
     
@@ -799,7 +834,8 @@ def main():
         slide_transition_left,
         slide_transition_right,
         wipe_transition_top,
-        wipe_transition_bottom
+        wipe_transition_bottom,
+        melt_transition
     ]
 
     index = 0
