@@ -563,9 +563,6 @@ def add_time_overlay(frame, temp, weather):
         print(f"Error adding overlay: {e}")
         return frame
 
-import json
-import random
-
 def get_random_quote(quotes_file='quotes.json'):
     """Gets a random quote from a JSON file."""
     # Load quotes from file
