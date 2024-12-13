@@ -703,7 +703,7 @@ def main():
 
     images = []
 
-        style_titles = {
+    style_titles = {
         "poem": "Today's Forecast in Verse",
         "haiku": "Today's Haiku Forecast",
         "cowboy": "Today's Frontier Forecast",
