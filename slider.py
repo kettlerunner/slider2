@@ -496,6 +496,70 @@ def melt_transition(current_img, next_img, num_frames):
 
         yield frame
 
+def wave_transition(current_img, next_img, num_frames):
+    current_img, next_img = ensure_same_channels(current_img, next_img)
+    height, width = current_img.shape[:2]
+
+    max_vertical_shift = int(height * 0.4)  # Less shift for a subtler effect
+    max_horizontal_shift = int(width * 0.02)  # Small horizontal sway
+
+    for i in range(num_frames):
+        alpha = i / num_frames
+        frame = next_img.copy().astype(np.float32)
+
+        # row_alpha determines how visible the old image is
+        row_alpha = 1 - alpha
+
+        # We will use a sinusoidal pattern that varies with time (i) and position (r)
+        # Example pattern:
+        # vertical shift = sin((r/height)*2π + alpha*2π)*max_vertical_shift*alpha
+        # horizontal shift = sin((r/height)*4π + alpha*4π)*max_horizontal_shift*alpha
+        
+        for r in range(height):
+            # Compute per-row shifts
+            vertical_phase = (r / height) * 2 * np.pi
+            vertical_shift = int(np.sin(vertical_phase + alpha * 2 * np.pi) * max_vertical_shift * alpha)
+
+            horizontal_phase = (r / height) * 4 * np.pi
+            horizontal_shift = int(np.sin(horizontal_phase + alpha * 4 * np.pi) * max_horizontal_shift * alpha)
+
+            new_r = r + vertical_shift
+            if 0 <= new_r < height:
+                curr_row = current_img[r, :, :].astype(np.float32)
+
+                # Handle alpha channel
+                has_alpha = (curr_row.shape[1] == 4)
+                if has_alpha:
+                    curr_bgr = curr_row[:, :3]
+                    curr_a = (curr_row[:, 3] / 255.0) * row_alpha
+                    curr_a = curr_a[:, np.newaxis]  # Match shape for broadcasting
+                else:
+                    curr_bgr = curr_row[:, :3]
+                    curr_a = row_alpha  # Uniform alpha if no transparency
+
+                # Apply horizontal shift by rolling the array
+                shifted_bgr = np.roll(curr_bgr, horizontal_shift, axis=0)
+                if has_alpha:
+                    shifted_a = np.roll(curr_a, horizontal_shift, axis=0)
+                else:
+                    # Uniform alpha just shifts as well
+                    # but since it's a scalar, no need to roll a scalar
+                    shifted_a = curr_a
+
+                base = frame[new_r, :, :3]
+                
+                if has_alpha:
+                    # out_bgr = curr_bgr * curr_a + base * (1 - curr_a)
+                    out_bgr = shifted_bgr * shifted_a + base * (1 - shifted_a)
+                else:
+                    # If no alpha channel in image, just do a simple fade blend
+                    # Treat shifted_a as a scalar here
+                    out_bgr = base * (1 - shifted_a) + shifted_bgr * shifted_a
+
+                frame[new_r, :, :3] = out_bgr
+
+        yield frame.astype(np.uint8)
+
 def stitch_images(images, width, height):
     num_images = len(images)
     
@@ -835,7 +899,8 @@ def main():
         slide_transition_right,
         wipe_transition_top,
         wipe_transition_bottom,
-        melt_transition
+        melt_transition,
+        wave_transition
     ]
 
     index = 0
