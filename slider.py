@@ -6,6 +6,7 @@ import json
 import random
 import cv2
 import numpy as np
+import math
 from datetime import datetime, timedelta
 import requests
 from google.auth.transport.requests import Request
@@ -654,6 +655,121 @@ def zen_ripple_transition(current_img, next_img, num_frames):
 
         yield frame.astype(np.uint8)
 
+def dynamic_petal_bloom_transition(current_img, next_img, num_frames):
+    current_img, next_img = ensure_same_channels(current_img, next_img)
+    height, width = current_img.shape[:2]
+    center_x, center_y = width / 2, height / 2
+
+    # Parameters
+    N = 8  # Number of petals
+    max_rotation = math.radians(30)  # Max rotation for each half
+    scale_factor = 0.3  # Max scale outward
+    inward_factor = 0.2  # How much to pull inward at start
+    blend_boundary = math.radians(2)  # Blend zone around petal edges
+    
+    def smoothstep(t):
+        return 3*t**2 - 2*t**3
+
+    ys, xs = np.indices((height, width))
+    dx = xs - center_x
+    dy = ys - center_y
+    radius = np.sqrt(dx*dx + dy*dy)
+    angle = np.arctan2(dy, dx)  # [-pi, pi]
+    angle_norm = (angle + 2*math.pi) % (2*math.pi)
+
+    petal_angle = 2 * math.pi / N
+    petal_index = (angle_norm // petal_angle).astype(np.int32)
+    
+    # Petal center angles
+    petal_center_angle = petal_index * petal_angle + petal_angle / 2.0
+    angle_diff = angle_norm - petal_center_angle
+    # Wrap angle_diff to [-pi, pi]
+    angle_diff = (angle_diff + math.pi) % (2*math.pi) - math.pi
+
+    for i in range(num_frames):
+        alpha = i / num_frames
+        frame = next_img.copy().astype(np.float32)
+        
+        # Compute transformations for this frame
+        # Petals first pull inward slightly (reduce radius) and then expand out.
+        # Use a sine-based easing: at alpha=0, radius reduced; at alpha=1, fully expanded.
+        # inward-outward motion: radius factor = 1 - inward_factor*(1 - alpha) + scale_factor*alpha
+        # Simplify: radius factor = 1 - inward_factor*(1 - alpha) + scale_factor*alpha
+        # = 1 - inward_factor + inward_factor*alpha + scale_factor*alpha
+        # = 1 - inward_factor + alpha*(inward_factor + scale_factor)
+        radius_factor = 1 - inward_factor + alpha*(inward_factor + scale_factor)
+        
+        # Rotation amount grows with alpha
+        # top half rotates +rot, bottom half -rot
+        rot = alpha * max_rotation
+
+        # Determine top or bottom half: angle_diff > 0 => top half, else bottom
+        top_half = (angle_diff > 0)
+        
+        # Half factor: For top half, +rot; for bottom half, -rot.
+        # We can also add a slight difference in scaling for top and bottom to be more dynamic.
+        half_sign = np.ones_like(angle_diff, dtype=np.float32)
+        half_sign[~top_half] = -1.0
+        
+        # Apply rotation: new_angle = angle + half_sign * rot
+        new_angle = angle + half_sign * rot
+        
+        # Apply radius factor: new_radius = radius * radius_factor
+        # To be more dynamic, let's add a wavy pattern to the radius change:
+        # For example, use a cosine that starts by pulling in a bit more:
+        # wave = cos(pi*(1-alpha)) gives 1 at alpha=0 and cos(pi)=-1 at alpha=1.
+        # We want a gentle wave: wave_factor = (cos(pi * (1 - alpha)) + 1)/2 ranges 1 to 0 over time.
+        # Combine with radius_factor to add subtle variation:
+        wave = (math.cos(math.pi * (1 - alpha)) + 1)/2  # 1 at start, 0 at end
+        # Let’s blend radius_factor and a slight additional inward pull at the start
+        adjusted_radius_factor = radius_factor * (0.9 + 0.1 * wave)
+        
+        new_radius = radius * adjusted_radius_factor
+        
+        # Petal boundary blending:
+        # Closer to ±petal_angle/2 means closer to edge.
+        half_petal = petal_angle / 2.0
+        boundary_dist = np.abs(angle_diff) - (half_petal - blend_boundary)
+        boundary_mask = np.ones_like(angle_diff, dtype=np.float32)
+        in_blend_zone = boundary_dist > 0
+        blend_norm = (boundary_dist[in_blend_zone] / blend_boundary)
+        blend_norm = np.clip(blend_norm, 0, 1)
+        blend_val = smoothstep(1 - blend_norm)
+        boundary_mask[in_blend_zone] = blend_val
+
+        # Convert polar coords back to Cartesian for sampling old image
+        src_x = (new_radius * np.cos(new_angle) + center_x).astype(np.float32)
+        src_y = (new_radius * np.sin(new_angle) + center_y).astype(np.float32)
+
+        inside = (src_x >= 0) & (src_x < width) & (src_y >= 0) & (src_y < height)
+
+        src_xi = np.clip(np.round(src_x[inside]).astype(np.int32), 0, width - 1)
+        src_yi = np.clip(np.round(src_y[inside]).astype(np.int32), 0, height - 1)
+
+        old_pixels = current_img[src_yi, src_xi].astype(np.float32)
+
+        # Factor for blending old image into new image:
+        # As alpha -> 1, old image fades. Multiply by boundary_mask so edges fade first.
+        factor = (1 - alpha)
+        
+        # Also modulate by boundary_mask[inside]
+        bm = boundary_mask[inside, np.newaxis]
+
+        final_factor = factor * bm
+
+        if frame.shape[2] == 4:
+            old_rgb = old_pixels[:, :3]
+            new_rgb = frame[inside, :3]
+            blended_rgb = new_rgb * (1 - final_factor) + old_rgb * final_factor
+            frame[inside, :3] = blended_rgb
+            # Keep alpha channel solid
+            frame[inside, 3] = 255.0
+        else:
+            new_rgb = frame[inside, :3]
+            blended_rgb = new_rgb * (1 - final_factor) + old_pixels[:, :3] * final_factor
+            frame[inside, :3] = blended_rgb
+        
+        yield frame.astype(np.uint8)
 
 def stitch_images(images, width, height):
     num_images = len(images)
@@ -996,7 +1112,8 @@ def main():
         wipe_transition_bottom,
         melt_transition,
         wave_transition,
-        zen_ripple_transition
+        zen_ripple_transition,
+        dynamic_petal_bloom_transition
     ]
 
     index = 0
