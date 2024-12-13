@@ -578,8 +578,7 @@ def get_random_quote(quotes_file='quotes.json'):
 
 def add_quote_overlay(frame, quote, source="", title=None, style=None):
     try:
-        # You can set a minimum box width in pixels.
-        MIN_BOX_WIDTH = 600  # Adjust this to your preference
+        MIN_BOX_WIDTH = 600  # Ensure a minimum width
 
         # Sanitize text
         quote = sanitize_text(quote)
@@ -592,39 +591,48 @@ def add_quote_overlay(frame, quote, source="", title=None, style=None):
         font_scale_quote = 0.8
         font_scale_source = 0.6
         font_scale_title = 0.9
-        font_color = (105, 105, 105)  # Dark gray
+
+        # Colors
+        font_color = (105, 105, 105)      # Dark gray for main text
+        font_color_title = (230, 230, 230) # Light gray for title
+        box_color = (255, 255, 255)        # White background
+        title_bar_color = (50, 50, 50)     # Dark gray background for title area
         thickness = 1
 
-        # Split the quote by newline first
+        # Split and wrap lines
         raw_quote_lines = quote.split('\n')
         quote_lines = []
         for raw_line in raw_quote_lines:
-            # Wrap each line individually, preserving intended line breaks
             wrapped = textwrap.wrap(raw_line.strip(), width=50) if raw_line.strip() else [""]
             quote_lines.extend(wrapped)
 
         title_lines = textwrap.wrap(title, width=50) if title else []
 
-        # If the source is "Today's Weather", do not display it
+        # If the source is "Today's Weather", skip it
         if source.strip().lower() == "today's weather":
             source_lines = []
         else:
             source_lines = textwrap.wrap(f"- {source}", width=50) if source else []
 
         # Calculate line heights
+        # Note: Multiplying by 1.3 was in original code to ensure height calculation, but you can adjust as needed.
         line_height_quote = cv2.getTextSize("Test", font, font_scale_quote*1.3, thickness)[0][1]
         line_height_title = cv2.getTextSize("Test", font, font_scale_title*1.3, thickness)[0][1]
         line_height_source = cv2.getTextSize("Test", font, font_scale_source*1.3, thickness)[0][1] if source_lines else 0
 
         # Calculate total text height
         text_height = 0
+        title_height = 0
         if title_lines:
-            text_height += line_height_title * len(title_lines) + 20
+            # Title area includes 20 pixels extra space
+            title_height = line_height_title * len(title_lines) + 20
+            text_height += title_height
+
         text_height += line_height_quote * len(quote_lines)
         if source_lines:
             text_height += 20 + (line_height_source * len(source_lines))
 
-        # Determine max line width from text
+        # Determine max line width
         max_line_widths = []
         if title_lines:
             max_line_widths += [cv2.getTextSize(line, font, font_scale_title, thickness)[0][0] for line in title_lines]
@@ -632,29 +640,70 @@ def add_quote_overlay(frame, quote, source="", title=None, style=None):
         if source_lines:
             max_line_widths += [cv2.getTextSize(line, font, font_scale_source, thickness)[0][0] for line in source_lines]
 
-        # Use at least the MIN_BOX_WIDTH, or larger if text requires it
         calculated_width = max(max_line_widths) if max_line_widths else 200
-        box_width = max(calculated_width + 40, MIN_BOX_WIDTH)  # Ensure minimum width
-
+        box_width = max(calculated_width + 40, MIN_BOX_WIDTH)
         box_height = text_height + 80
         box_x = (frame.shape[1] - box_width) // 2
         box_y = (frame.shape[0] - box_height) // 2
 
-        # Draw the semi-transparent box
+        # Draw main semi-transparent box
         overlay_frame = frame.copy()
-        cv2.rectangle(overlay_frame, (box_x, box_y), (box_x + box_width, box_y + box_height), (255, 255, 255), -1)
+        cv2.rectangle(overlay_frame, (box_x, box_y), (box_x + box_width, box_y + box_height), box_color, -1)
         alpha = 0.8
         cv2.addWeighted(overlay_frame, alpha, frame, 1 - alpha, 0, overlay_frame)
 
-        # Print Title
-        y = box_y + 20
+        # Draw title bar if needed
+        if title_lines:
+            title_bar_y_end = box_y + title_height
+            cv2.rectangle(overlay_frame, (box_x, box_y), (box_x + box_width, title_bar_y_end), title_bar_color, -1)
+
+        # Now vertically center the title text within the title area
+        # Compute total title text block height
+        title_line_sizes = []
         for line in title_lines:
             text_size, _ = cv2.getTextSize(line, font, font_scale_title, thickness)
-            x = (frame.shape[1] - text_size[0]) // 2
-            cv2.putText(overlay_frame, line, (x, y + text_size[1]), font, font_scale_title, font_color, thickness, cv2.LINE_AA)
-            y += text_size[1] + 20
+            title_line_sizes.append(text_size)
 
-        # Print Quote lines
+        if title_lines:
+            # Each title line: place line -> y += line_height + 10 (except after last line maybe)
+            # Let's consider no trailing space after the last line.
+            total_title_text_height = sum(t[1] for t in title_line_sizes) + ((len(title_lines)-1)*10)
+
+            # The title area is title_height high, with presumably 20 pixels padding included.
+            # We'll assume 10 pixels padding top, 10 pixels padding bottom:
+            # available space for text = title_height - 20
+            # center lines in that space:
+            available_space = title_height - 20
+            # vertical offset so text block is centered:
+            vertical_offset = (available_space - total_title_text_height) // 2
+            # initial y is top of the title bar + 10 padding + offset
+            y = box_y + 10 + vertical_offset
+        else:
+            # If no title lines, just start after some padding
+            y = box_y + 20
+
+        # Print Title
+        for i, line in enumerate(title_lines):
+            text_size = title_line_sizes[i]
+            line_height = text_size[1]
+            x = (frame.shape[1] - text_size[0]) // 2
+            cv2.putText(overlay_frame, line, (x, y + line_height), font, font_scale_title, font_color_title, thickness, cv2.LINE_AA)
+            y += line_height
+            if i < len(title_lines)-1:
+                y += 10
+
+        # Print Quote lines (below title area)
+        # Add some vertical space if there's a title
+        if title_lines:
+            # Start quotes after the title bar area ends
+            # The title bar ends at box_y + title_height
+            # We ended printing title at y (somewhere inside), so let's reset y
+            y = box_y + title_height
+        else:
+            # No title, just continue from y
+            pass
+
+        y += 20  # add padding before quotes
         for line in quote_lines:
             text_size, _ = cv2.getTextSize(line, font, font_scale_quote, thickness)
             x = (frame.shape[1] - text_size[0]) // 2
