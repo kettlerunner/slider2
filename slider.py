@@ -690,26 +690,21 @@ def save_local_metadata(metadata_file, metadata):
 
 def main():
     service = authenticate_drive()
-
     folder_id = '1hpBzZ_kiXpIBtRv1FN3da8zOhT5J0Ggi'  # Replace with your folder ID
     files = list_files_in_folder(service, folder_id)
-
     temp_dir = 'images'
     if not os.path.exists(temp_dir):
         os.makedirs(temp_dir)
 
     metadata_file = 'metadata.json'
     local_metadata = load_local_metadata(metadata_file)
-
     images = []
-
     style_titles = {
         "poem": "Today's Forecast in Verse",
         "haiku": "Today's Haiku Forecast",
         "cowboy": "Today's Frontier Forecast",
         "zen_master": "Today's Zencast"
     }
-
     for file in files:
         file_name = file['name']
         file_path = os.path.join(temp_dir, file_name)
