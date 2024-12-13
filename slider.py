@@ -52,6 +52,84 @@ client = OpenAI(api_key=openai_key)
 # If modifying these SCOPES, delete the file token.json.
 SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 
+def get_prominent_color(image):
+    # Ignore alpha channel if present
+    if image.shape[2] == 4:
+        # Create a mask of non-transparent pixels
+        alpha_channel = image[:, :, 3]
+        mask = alpha_channel > 0
+        # Get the RGB channels
+        rgb_image = image[:, :, :3]
+        # Apply mask
+        rgb_image = rgb_image[mask]
+    else:
+        rgb_image = image.reshape(-1, 3)
+    
+    if len(rgb_image) == 0:
+        # Fallback color if no pixels
+        return (128, 128, 128)
+    
+    # Convert to float32
+    pixels = np.float32(rgb_image)
+    # Define criteria and apply kmeans()
+    K = 5  # Number of clusters to find
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+    _, labels, centers = cv2.kmeans(pixels, K, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+    
+    # Count labels to find the frequency of each color
+    counts = np.bincount(labels.flatten())
+    
+    # Combine centers and counts
+    color_counts = list(zip(centers, counts))
+    
+    # Sort colors by counts (from least to most frequent)
+    color_counts.sort(key=lambda x: x[1])
+    
+    # Filter out colors that are too light or too dark
+    valid_colors = []
+    for center, count in color_counts:
+        color = center.astype(int)
+        # Convert to HSV to check brightness
+        color_hsv = cv2.cvtColor(np.uint8([[color]]), cv2.COLOR_BGR2HSV)[0][0]
+        brightness = color_hsv[2]
+        if 50 < brightness < 205:
+            valid_colors.append((color, count))
+    
+    if not valid_colors:
+        # If all colors are too light or too dark, return a default color
+        return (128, 128, 128)
+    
+    # Choose a less dominant color (e.g., second least frequent valid color)
+    if len(valid_colors) >= 2:
+        color = valid_colors[1][0]
+    else:
+        # Only one valid color
+        color = valid_colors[0][0]
+    
+    return tuple(map(int, color))
+    
+def add_progress_bar(frame, progress, color, height=2):
+    frame_copy = frame.copy()
+    width = frame_copy.shape[1]
+    progress_width = int(progress * width)
+    color = tuple(map(int, color))
+    if len(color) == 3 and frame_copy.shape[2] == 4:
+        # Add alpha channel
+        color = (*color, 255)
+    cv2.rectangle(frame_copy, (0, 0), (progress_width, height), color, -1)
+    return frame_copy
+
+def display_image_with_progress(frame, display_time, color):
+    display_interval = 0.1  # Update every 100 milliseconds
+    num_intervals = int(display_time / display_interval)
+    for i in range(num_intervals):
+        progress = i / num_intervals
+        frame_with_progress = add_progress_bar(frame, progress, color)
+        cv2.imshow('slideshow', frame_with_progress)
+        if cv2.waitKey(int(display_interval * 1000)) == ord('q'):
+            cv2.destroyAllWindows()
+            exit()
+
 def get_weather_forecast2(api_key, city="Waupun", country_code="US"):
     """Fetches the weather forecast for the day from OpenWeatherMap API."""
     url = f"http://api.openweathermap.org/data/2.5/forecast?q={city},{country_code}&units=imperial&appid={api_key}"
@@ -89,7 +167,6 @@ def get_tldr_forecast(weather_data, style="random"):
         "poem",
         "haiku",
         "cowboy",
-        "villain",
         "zen_master",
     ]
 
@@ -97,11 +174,10 @@ def get_tldr_forecast(weather_data, style="random"):
         style = random.choice(styles)
 
     style_prompts = {
-        "poem": "Turn the weather forecast into a short whimsical poem. Be concise.",
+        "poem": "Turn the weather forecast into a very short whimsical poem. Be concise and short.",
         "haiku": "Write the weather forecast as a short haiku. Minimal and poetic.",
-        "cowboy": "Summarize the weather like an old cowboy talking to his horse. Keep it short and rugged.",
-        "villain": "Summarize the weather as a dramatic villain plotting world domination. Keep it short and diabolical.",
-        "zen_master": "Summarize the weather like a Zen master sharing wisdom. Be very concise, yet profound.",
+        "cowboy": "Summarize the weather like an old cowboy talking to his horse. Keep it very short and rugged, and use obscure references.",
+        "zen_master": "Summarize the weather like a Zen master sharing wisdom. Be very concise, yet profound, straight to the point.",
     }
 
     prompt = f"""
@@ -112,18 +188,18 @@ def get_tldr_forecast(weather_data, style="random"):
     {style_prompts.get(style, "Summarize this into a conversational, super short forecast.")}
     """
 
-    completion = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "user", "content": prompt}
-        ]
-    )
-
     try:
-        return completion.choices[0].message.content.strip()
+        completion = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
+        )
+        summary = completion.choices[0].message.content.strip()
+        return summary, style
     except Exception as e:
         print(f"Error generating forecast summary: {e}")
-        return f"Could not generate forecast summary in {style} style."
+        return f"Could not generate forecast summary in {style} style.", style
 
 def get_weather_forecast(api_key, city="Waupun", country_code="US"):
     url = f"http://api.openweathermap.org/data/2.5/forecast?q={city},{country_code}&units=imperial&appid={api_key}"
@@ -580,68 +656,99 @@ def get_random_quote(quotes_file='quotes.json'):
     
     return quote, source
 
-def add_quote_overlay(frame, quote, source):
+def add_quote_overlay(frame, quote, source="", title=None, style=None):
     try:
-        # Sanitize the text
+        # You can set a minimum box width in pixels.
+        MIN_BOX_WIDTH = 600  # Adjust this to your preference
+
+        # Sanitize text
         quote = sanitize_text(quote)
-        source = sanitize_text(source)
-        
-        # Define fonts and scales
+        if title:
+            title = sanitize_text(title)
+        source = sanitize_text(source) if source else ""
+        style = sanitize_text(style) if style else ""
+
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale_quote = 0.8
         font_scale_source = 0.6
-        font_color = (105, 105, 105)  # Dark gray color
+        font_scale_title = 0.9
+        font_color = (105, 105, 105)  # Dark gray
         thickness = 1
-        
-        # Maximum width for text
-        max_width = frame.shape[1] - 40  # Padding of 20 on each side
-        
-        # Split the quote and source into multiple lines
-        quote_lines = textwrap.wrap(quote, width=50)
-        source_lines = textwrap.wrap(f"- {source}", width=50)
-        
-        # Calculate text size and total height
-        text_height = 0
+
+        # Split the quote by newline first
+        raw_quote_lines = quote.split('\n')
+        quote_lines = []
+        for raw_line in raw_quote_lines:
+            # Wrap each line individually, preserving intended line breaks
+            wrapped = textwrap.wrap(raw_line.strip(), width=50) if raw_line.strip() else [""]
+            quote_lines.extend(wrapped)
+
+        title_lines = textwrap.wrap(title, width=50) if title else []
+
+        # If the source is "Today's Weather", do not display it
+        if source.strip().lower() == "today's weather":
+            source_lines = []
+        else:
+            source_lines = textwrap.wrap(f"- {source}", width=50) if source else []
+
+        # Calculate line heights
         line_height_quote = cv2.getTextSize("Test", font, font_scale_quote*1.3, thickness)[0][1]
-        line_height_source = cv2.getTextSize("Test", font, font_scale_source*1.3, thickness)[0][1]
-        
+        line_height_title = cv2.getTextSize("Test", font, font_scale_title*1.3, thickness)[0][1]
+        line_height_source = cv2.getTextSize("Test", font, font_scale_source*1.3, thickness)[0][1] if source_lines else 0
+
+        # Calculate total text height
+        text_height = 0
+        if title_lines:
+            text_height += line_height_title * len(title_lines) + 20
         text_height += line_height_quote * len(quote_lines)
-        text_height += line_height_source * len(source_lines)
-        text_height += 20  # Additional padding between quote and source
+        if source_lines:
+            text_height += 20 + (line_height_source * len(source_lines))
 
-        # Determine the width of the box
-        max_line_width = max(
-            [cv2.getTextSize(line, font, font_scale_quote, thickness)[0][0] for line in quote_lines] +
-            [cv2.getTextSize(line, font, font_scale_source, thickness)[0][0] for line in source_lines]
-        )
+        # Determine max line width from text
+        max_line_widths = []
+        if title_lines:
+            max_line_widths += [cv2.getTextSize(line, font, font_scale_title, thickness)[0][0] for line in title_lines]
+        max_line_widths += [cv2.getTextSize(line, font, font_scale_quote, thickness)[0][0] for line in quote_lines if line != ""]
+        if source_lines:
+            max_line_widths += [cv2.getTextSize(line, font, font_scale_source, thickness)[0][0] for line in source_lines]
 
-        # Box dimensions
-        box_width = max_line_width + 40  # Adding padding
-        box_height = text_height + 80  # Adding padding
+        # Use at least the MIN_BOX_WIDTH, or larger if text requires it
+        calculated_width = max(max_line_widths) if max_line_widths else 200
+        box_width = max(calculated_width + 40, MIN_BOX_WIDTH)  # Ensure minimum width
+
+        box_height = text_height + 80
         box_x = (frame.shape[1] - box_width) // 2
         box_y = (frame.shape[0] - box_height) // 2
 
         # Draw the semi-transparent box
         overlay_frame = frame.copy()
         cv2.rectangle(overlay_frame, (box_x, box_y), (box_x + box_width, box_y + box_height), (255, 255, 255), -1)
-        alpha = 0.8  # Transparency factor
+        alpha = 0.8
         cv2.addWeighted(overlay_frame, alpha, frame, 1 - alpha, 0, overlay_frame)
 
-        # Draw each line of the quote
-        y = box_y + 20  # Padding inside the box
+        # Print Title
+        y = box_y + 20
+        for line in title_lines:
+            text_size, _ = cv2.getTextSize(line, font, font_scale_title, thickness)
+            x = (frame.shape[1] - text_size[0]) // 2
+            cv2.putText(overlay_frame, line, (x, y + text_size[1]), font, font_scale_title, font_color, thickness, cv2.LINE_AA)
+            y += text_size[1] + 20
+
+        # Print Quote lines
         for line in quote_lines:
             text_size, _ = cv2.getTextSize(line, font, font_scale_quote, thickness)
-            x = (frame.shape[1] - text_size[0]) // 2  # Center the text horizontally
+            x = (frame.shape[1] - text_size[0]) // 2
             cv2.putText(overlay_frame, line, (x, y + text_size[1]), font, font_scale_quote, font_color, thickness, cv2.LINE_AA)
-            y += text_size[1] + 10  # Line height + padding
+            y += text_size[1] + 10
 
-        # Draw each line of the source
-        y += 10  # Additional padding before the source
-        for line in source_lines:
-            text_size, _ = cv2.getTextSize(line, font, font_scale_source, thickness)
-            x = (frame.shape[1] - text_size[0]) // 2  # Center the text horizontally
-            cv2.putText(overlay_frame, line, (x, y + text_size[1]), font, font_scale_source, font_color, thickness, cv2.LINE_AA)
-            y += text_size[1] + 10  # Line height + padding
+        # Print Source (if any)
+        if source_lines:
+            y += 10
+            for line in source_lines:
+                text_size, _ = cv2.getTextSize(line, font, font_scale_source, thickness)
+                x = (frame.shape[1] - text_size[0]) // 2
+                cv2.putText(overlay_frame, line, (x, y + text_size[1]), font, font_scale_source, font_color, thickness, cv2.LINE_AA)
+                y += text_size[1] + 10
 
         return overlay_frame
     except Exception as e:
@@ -672,6 +779,14 @@ def main():
     local_metadata = load_local_metadata(metadata_file)
 
     images = []
+
+    style_titles = {
+        "poem": "Today's Forecast in Verse",
+        "haiku": "Today's Haiku Forecast",
+        "cowboy": "Today's Frontier Forecast",
+        "zen_master": "Today's Zencast"
+    }
+    
     for file in files:
         file_name = file['name']
         file_path = os.path.join(temp_dir, file_name)
@@ -727,81 +842,119 @@ def main():
     current_img = resize_and_pad(images[index], frame_width, frame_height)
     forecast = get_weather_forecast(api_key)
     #news = get_ai_generated_news()
-    while True:
-        
-        temp, weather = get_weather_data(api_key)
-        
-        # Randomly choose display type: single image, stitched images, or quote
-        display_type = random.choice(["single", "stitch", "quote", "forecast", "today"])
-        
-        if display_type == "forecast":
-            single_image = images[(index + 1) % len(images)]
-            next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
-            next_img = add_forecast_overlay(next_img, forecast)
-        elif display_type == "news":
-            single_image = images[(index + 1) % len(images)]
-            next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
-            news = get_ai_generated_news()
-            next_img = add_news_overlay(next_img, news)
-        elif display_type == "stitch":
-            stitch_count = random.randint(2, 4)
-            stitch_indices = random.sample(range(len(images)), stitch_count)
-            stitched_images = [images[i] for i in stitch_indices]
-            next_img = stitch_images(stitched_images, frame_width, frame_height)
-            if next_img.shape[2] == 4:
-                next_img = cv2.cvtColor(next_img, cv2.COLOR_BGRA2BGR)
-        elif display_type == "quote":
-            single_image = images[(index + 1) % len(images)]
-            next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
-            quote, source = get_random_quote()
-            next_img = add_quote_overlay(next_img, quote, source)
-        elif display_type == "today":
-            single_image = images[(index + 1) % len(images)]
-            next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
+
+    # Initialize the camera
+    cap = cv2.VideoCapture(0)  # Use the default camera
+
+    # Define brightness threshold
+    brightness_threshold = 50  # Adjust this value as needed
+
+    try:
+        while True:
+            # Capture a frame from the camera
+            ret, camera_frame = cap.read()
+            if not ret:
+                print("Failed to capture image from camera")
+                break
+
+            # Convert the frame to grayscale and compute the average brightness
+            gray = cv2.cvtColor(camera_frame, cv2.COLOR_BGR2GRAY)
+            mean_brightness = np.mean(gray)
+
+            if mean_brightness < brightness_threshold:
+                # Lights are off, display screensaver
+                screensaver_image = random.choice(images)
+                dim_factor = 0.3  # Adjust dim factor as needed (0.0 to 1.0)
+                dimmed_image = (screensaver_image * dim_factor).astype(np.uint8)
+                dimmed_image = resize_and_pad(dimmed_image, frame_width, frame_height)
+                cv2.imshow('slideshow', dimmed_image)
+                if cv2.waitKey(1000) == ord('q'):
+                    break
+                continue  # Skip the rest of the loop
+
+            temp, weather = get_weather_data(api_key)
             
-            city = "Waupun"
-            country_code = "US"
-        
-            # Step 1: Fetch Weather Data
-            weather_data = get_weather_forecast2(api_key, city, country_code)
+            # Randomly choose display type: single image, stitched images, or quote
+            display_type = random.choice(["single", "stitch", "quote", "forecast", "today"])
             
-            # Step 2: Generate TL;DR Summary
-            if weather_data:
-                forecast_summary = get_tldr_forecast(weather_data)
+            if display_type == "forecast":
+                single_image = images[(index + 1) % len(images)]
+                next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
+                next_img = add_forecast_overlay(next_img, forecast)
+            elif display_type == "news":
+                single_image = images[(index + 1) % len(images)]
+                next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
+                news = get_ai_generated_news()
+                next_img = add_news_overlay(next_img, news)
+            elif display_type == "stitch":
+                stitch_count = random.randint(2, 4)
+                stitch_indices = random.sample(range(len(images)), stitch_count)
+                stitched_images = [images[i] for i in stitch_indices]
+                next_img = stitch_images(stitched_images, frame_width, frame_height)
+                if next_img.shape[2] == 4:
+                    next_img = cv2.cvtColor(next_img, cv2.COLOR_BGRA2BGR)
+            elif display_type == "quote":
+                single_image = images[(index + 1) % len(images)]
+                next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
+                quote, source = get_random_quote()
+                next_img = add_quote_overlay(next_img, quote, source)
+            elif display_type == "today":
+                single_image = images[(index + 1) % len(images)]
+                next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
+                
+                city = "Waupun"
+                country_code = "US"
+                custom_title = ""
+            
+                # Step 1: Fetch Weather Data
+                weather_data = get_weather_forecast2(api_key, city, country_code)
+                
+                # Step 2: Generate TL;DR Summary
+                if weather_data:
+                    forecast_summary, style_used = get_tldr_forecast(weather_data)
+                    # Now you have both the generated summary and the style used
+                    custom_title = style_titles.get(style_used, "Today's Forecast")
+                else:
+                    print("No weather data available.")
+
+                next_img = add_quote_overlay(
+                    next_img, 
+                    quote=forecast_summary, 
+                    source="Today's Weather", 
+                    title=custom_title, 
+                    style=None  # No style line
+                )
             else:
-                print("No weather data available.")
-
-            next_img = add_quote_overlay(next_img, forecast_summary, "Today's Weather")
-        else:
-            single_image = images[(index + 1) % len(images)]
-            next_img = create_single_image_with_background(single_image, frame_width, frame_height)
+                single_image = images[(index + 1) % len(images)]
+                next_img = create_single_image_with_background(single_image, frame_width, frame_height)
+            
+            # Update forecast periodically
+            if datetime.now().minute == 0:
+                forecast = get_weather_forecast(api_key)
         
-        # Update forecast and news periodically (e.g., every hour)
-        if datetime.now().minute == 0:
-            forecast = get_weather_forecast(api_key)
-
-        frame_with_overlay = add_time_overlay(current_img, temp, weather)
-        cv2.imshow('slideshow', frame_with_overlay)
-        if cv2.waitKey(display_time * 1000) == ord('q'):
-            cv2.destroyAllWindows()
-            exit()
-
-        transition = random.choice(transitions)
-        for frame in transition(current_img, next_img, num_transition_frames):
-            frame_with_overlay = add_time_overlay(frame, temp, weather)
-            cv2.imshow('slideshow', frame_with_overlay)
-            if cv2.waitKey(1) == ord('q'):
-                cv2.destroyAllWindows()
-                exit()
-
-        frame_with_overlay = add_time_overlay(next_img, temp, weather)
-        cv2.imshow('slideshow', frame_with_overlay)
-        if cv2.waitKey(display_time * 1000) == ord('q'):
-            cv2.destroyAllWindows()
-            exit()
-
-        current_img = next_img
-        index = (index + 1) % len(images)
+            # Get prominent color from current image
+            current_prominent_color = get_prominent_color(current_img)
+        
+            # Add time overlay and display current image with progress bar
+            frame_with_overlay = add_time_overlay(current_img, temp, weather)
+            display_image_with_progress(frame_with_overlay, display_time, current_prominent_color)
+        
+            # Transition between images
+            transition = random.choice(transitions)
+            for frame in transition(current_img, next_img, num_transition_frames):
+                frame_with_overlay = add_time_overlay(frame, temp, weather)
+                cv2.imshow('slideshow', frame_with_overlay)
+                if cv2.waitKey(1) == ord('q'):
+                    cv2.destroyAllWindows()
+                    exit()
+        
+            # Prepare for next loop iteration
+            current_img = next_img
+            index = (index + 1) % len(images)
+    finally:
+        # Release the camera resource
+        cap.release()
+        cv2.destroyAllWindows()
 
 if __name__ == '__main__':
     main()
