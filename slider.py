@@ -793,28 +793,28 @@ def main():
             country_code = "US"
             custom_title = ""
             
-                # Step 1: Fetch Weather Data
-                weather_data = get_weather_forecast2(api_key, city, country_code)
-                
-                # Step 2: Generate TL;DR Summary
-                if weather_data:
-                    forecast_summary, style_used = get_tldr_forecast(weather_data)
-                    # Now you have both the generated summary and the style used
-                    custom_title = style_titles.get(style_used, "Today's Forecast")
-                else:
-                    print("No weather data available.")
-
-                next_img = add_quote_overlay(
-                    next_img, 
-                    quote=forecast_summary, 
-                    source="Today's Weather", 
-                    title=custom_title, 
-                    style=None  # No style line
-                )
+            # Step 1: Fetch Weather Data
+            weather_data = get_weather_forecast2(api_key, city, country_code)
+            
+            # Step 2: Generate TL;DR Summary
+            if weather_data:
+                forecast_summary, style_used = get_tldr_forecast(weather_data)
+                # Now you have both the generated summary and the style used
+                custom_title = style_titles.get(style_used, "Today's Forecast")
             else:
-                single_image = images[(index + 1) % len(images)]
-                next_img = create_single_image_with_background(single_image, frame_width, frame_height)
-        
+                print("No weather data available.")
+
+            next_img = add_quote_overlay(
+                next_img, 
+                quote=forecast_summary, 
+                source="Today's Weather", 
+                title=custom_title, 
+                style=None  # No style line
+            )
+        else:
+            single_image = images[(index + 1) % len(images)]
+            next_img = create_single_image_with_background(single_image, frame_width, frame_height)
+    
         # Update forecast and news periodically (e.g., every hour)
         if datetime.now().minute == 0:
             forecast = get_weather_forecast(api_key)
