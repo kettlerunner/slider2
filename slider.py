@@ -90,7 +90,6 @@ def get_tldr_forecast(weather_data, style="random"):
         "poem",
         "haiku",
         "cowboy",
-        "villain",
         "zen_master",
     ]
 
@@ -98,11 +97,10 @@ def get_tldr_forecast(weather_data, style="random"):
         style = random.choice(styles)
 
     style_prompts = {
-        "poem": "Turn the weather forecast into a short whimsical poem. Be concise.",
+        "poem": "Turn the weather forecast into a very short whimsical poem. Be concise and short.",
         "haiku": "Write the weather forecast as a short haiku. Minimal and poetic.",
-        "cowboy": "Summarize the weather like an old cowboy talking to his horse. Keep it short and rugged.",
-        "villain": "Summarize the weather as a dramatic villain plotting world domination. Keep it short and diabolical.",
-        "zen_master": "Summarize the weather like a Zen master sharing wisdom. Be very concise, yet profound.",
+        "cowboy": "Summarize the weather like an old cowboy talking to his horse. Keep it very short and rugged, and use obscure references.",
+        "zen_master": "Summarize the weather like a Zen master sharing wisdom. Be very concise, yet profound, straight to the point.",
     }
 
     prompt = f"""
@@ -113,18 +111,18 @@ def get_tldr_forecast(weather_data, style="random"):
     {style_prompts.get(style, "Summarize this into a conversational, super short forecast.")}
     """
 
-    completion = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "user", "content": prompt}
-        ]
-    )
-
     try:
-        return completion.choices[0].message.content.strip()
+        completion = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
+        )
+        summary = completion.choices[0].message.content.strip()
+        return summary, style
     except Exception as e:
         print(f"Error generating forecast summary: {e}")
-        return f"Could not generate forecast summary in {style} style."
+        return f"Could not generate forecast summary in {style} style.", style
 
 def get_weather_forecast(api_key, city="Waupun", country_code="US"):
     url = f"http://api.openweathermap.org/data/2.5/forecast?q={city},{country_code}&units=imperial&appid={api_key}"
@@ -581,68 +579,99 @@ def get_random_quote(quotes_file='quotes.json'):
     
     return quote, source
 
-def add_quote_overlay(frame, quote, source):
+def add_quote_overlay(frame, quote, source="", title=None, style=None):
     try:
-        # Sanitize the text
+        # You can set a minimum box width in pixels.
+        MIN_BOX_WIDTH = 600  # Adjust this to your preference
+
+        # Sanitize text
         quote = sanitize_text(quote)
-        source = sanitize_text(source)
-        
-        # Define fonts and scales
+        if title:
+            title = sanitize_text(title)
+        source = sanitize_text(source) if source else ""
+        style = sanitize_text(style) if style else ""
+
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale_quote = 0.8
         font_scale_source = 0.6
-        font_color = (105, 105, 105)  # Dark gray color
+        font_scale_title = 0.9
+        font_color = (105, 105, 105)  # Dark gray
         thickness = 1
-        
-        # Maximum width for text
-        max_width = frame.shape[1] - 40  # Padding of 20 on each side
-        
-        # Split the quote and source into multiple lines
-        quote_lines = textwrap.wrap(quote, width=50)
-        source_lines = textwrap.wrap(f"- {source}", width=50)
-        
-        # Calculate text size and total height
-        text_height = 0
+
+        # Split the quote by newline first
+        raw_quote_lines = quote.split('\n')
+        quote_lines = []
+        for raw_line in raw_quote_lines:
+            # Wrap each line individually, preserving intended line breaks
+            wrapped = textwrap.wrap(raw_line.strip(), width=50) if raw_line.strip() else [""]
+            quote_lines.extend(wrapped)
+
+        title_lines = textwrap.wrap(title, width=50) if title else []
+
+        # If the source is "Today's Weather", do not display it
+        if source.strip().lower() == "today's weather":
+            source_lines = []
+        else:
+            source_lines = textwrap.wrap(f"- {source}", width=50) if source else []
+
+        # Calculate line heights
         line_height_quote = cv2.getTextSize("Test", font, font_scale_quote*1.3, thickness)[0][1]
-        line_height_source = cv2.getTextSize("Test", font, font_scale_source*1.3, thickness)[0][1]
-        
+        line_height_title = cv2.getTextSize("Test", font, font_scale_title*1.3, thickness)[0][1]
+        line_height_source = cv2.getTextSize("Test", font, font_scale_source*1.3, thickness)[0][1] if source_lines else 0
+
+        # Calculate total text height
+        text_height = 0
+        if title_lines:
+            text_height += line_height_title * len(title_lines) + 20
         text_height += line_height_quote * len(quote_lines)
-        text_height += line_height_source * len(source_lines)
-        text_height += 20  # Additional padding between quote and source
+        if source_lines:
+            text_height += 20 + (line_height_source * len(source_lines))
 
-        # Determine the width of the box
-        max_line_width = max(
-            [cv2.getTextSize(line, font, font_scale_quote, thickness)[0][0] for line in quote_lines] +
-            [cv2.getTextSize(line, font, font_scale_source, thickness)[0][0] for line in source_lines]
-        )
+        # Determine max line width from text
+        max_line_widths = []
+        if title_lines:
+            max_line_widths += [cv2.getTextSize(line, font, font_scale_title, thickness)[0][0] for line in title_lines]
+        max_line_widths += [cv2.getTextSize(line, font, font_scale_quote, thickness)[0][0] for line in quote_lines if line != ""]
+        if source_lines:
+            max_line_widths += [cv2.getTextSize(line, font, font_scale_source, thickness)[0][0] for line in source_lines]
 
-        # Box dimensions
-        box_width = max_line_width + 40  # Adding padding
-        box_height = text_height + 80  # Adding padding
+        # Use at least the MIN_BOX_WIDTH, or larger if text requires it
+        calculated_width = max(max_line_widths) if max_line_widths else 200
+        box_width = max(calculated_width + 40, MIN_BOX_WIDTH)  # Ensure minimum width
+
+        box_height = text_height + 80
         box_x = (frame.shape[1] - box_width) // 2
         box_y = (frame.shape[0] - box_height) // 2
 
         # Draw the semi-transparent box
         overlay_frame = frame.copy()
         cv2.rectangle(overlay_frame, (box_x, box_y), (box_x + box_width, box_y + box_height), (255, 255, 255), -1)
-        alpha = 0.8  # Transparency factor
+        alpha = 0.8
         cv2.addWeighted(overlay_frame, alpha, frame, 1 - alpha, 0, overlay_frame)
 
-        # Draw each line of the quote
-        y = box_y + 20  # Padding inside the box
+        # Print Title
+        y = box_y + 20
+        for line in title_lines:
+            text_size, _ = cv2.getTextSize(line, font, font_scale_title, thickness)
+            x = (frame.shape[1] - text_size[0]) // 2
+            cv2.putText(overlay_frame, line, (x, y + text_size[1]), font, font_scale_title, font_color, thickness, cv2.LINE_AA)
+            y += text_size[1] + 20
+
+        # Print Quote lines
         for line in quote_lines:
             text_size, _ = cv2.getTextSize(line, font, font_scale_quote, thickness)
-            x = (frame.shape[1] - text_size[0]) // 2  # Center the text horizontally
+            x = (frame.shape[1] - text_size[0]) // 2
             cv2.putText(overlay_frame, line, (x, y + text_size[1]), font, font_scale_quote, font_color, thickness, cv2.LINE_AA)
-            y += text_size[1] + 10  # Line height + padding
+            y += text_size[1] + 10
 
-        # Draw each line of the source
-        y += 10  # Additional padding before the source
-        for line in source_lines:
-            text_size, _ = cv2.getTextSize(line, font, font_scale_source, thickness)
-            x = (frame.shape[1] - text_size[0]) // 2  # Center the text horizontally
-            cv2.putText(overlay_frame, line, (x, y + text_size[1]), font, font_scale_source, font_color, thickness, cv2.LINE_AA)
-            y += text_size[1] + 10  # Line height + padding
+        # Print Source (if any)
+        if source_lines:
+            y += 10
+            for line in source_lines:
+                text_size, _ = cv2.getTextSize(line, font, font_scale_source, thickness)
+                x = (frame.shape[1] - text_size[0]) // 2
+                cv2.putText(overlay_frame, line, (x, y + text_size[1]), font, font_scale_source, font_color, thickness, cv2.LINE_AA)
+                y += text_size[1] + 10
 
         return overlay_frame
     except Exception as e:
@@ -673,6 +702,14 @@ def main():
     local_metadata = load_local_metadata(metadata_file)
 
     images = []
+
+        style_titles = {
+        "poem": "Today's Forecast in Verse",
+        "haiku": "Today's Haiku Forecast",
+        "cowboy": "Today's Frontier Forecast",
+        "zen_master": "Today's Zencast"
+    }
+
     for file in files:
         file_name = file['name']
         file_path = os.path.join(temp_dir, file_name)
@@ -762,20 +799,29 @@ def main():
             
             city = "Waupun"
             country_code = "US"
-        
-            # Step 1: Fetch Weather Data
-            weather_data = get_weather_forecast2(api_key, city, country_code)
+            custom_title = ""
             
-            # Step 2: Generate TL;DR Summary
-            if weather_data:
-                forecast_summary = get_tldr_forecast(weather_data)
-            else:
-                print("No weather data available.")
+                # Step 1: Fetch Weather Data
+                weather_data = get_weather_forecast2(api_key, city, country_code)
+                
+                # Step 2: Generate TL;DR Summary
+                if weather_data:
+                    forecast_summary, style_used = get_tldr_forecast(weather_data)
+                    # Now you have both the generated summary and the style used
+                    custom_title = style_titles.get(style_used, "Today's Forecast")
+                else:
+                    print("No weather data available.")
 
-            next_img = add_quote_overlay(next_img, forecast_summary, "Today's Weather")
-        else:
-            single_image = images[(index + 1) % len(images)]
-            next_img = create_single_image_with_background(single_image, frame_width, frame_height)
+                next_img = add_quote_overlay(
+                    next_img, 
+                    quote=forecast_summary, 
+                    source="Today's Weather", 
+                    title=custom_title, 
+                    style=None  # No style line
+                )
+            else:
+                single_image = images[(index + 1) % len(images)]
+                next_img = create_single_image_with_background(single_image, frame_width, frame_height)
         
         # Update forecast and news periodically (e.g., every hour)
         if datetime.now().minute == 0:
