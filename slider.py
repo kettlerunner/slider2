@@ -87,12 +87,7 @@ def get_tldr_forecast(weather_data, style="random"):
 
     styles = [
         "poem",
-        "snoop_dogg",
-        "abe_lincoln",
-        "shakespeare",
-        "pirate",
         "haiku",
-        "yoda",
         "cowboy",
         "villain",
         "zen_master",
@@ -103,12 +98,7 @@ def get_tldr_forecast(weather_data, style="random"):
 
     style_prompts = {
         "poem": "Turn the weather forecast into a short whimsical poem. Be concise.",
-        "snoop_dogg": "Summarize the weather in the style of Snoop Dogg. Keep it cool, funky, and very short.",
-        "abe_lincoln": "Summarize the weather as if it were spoken by Abraham Lincoln in a thoughtful speech. Very short. TLDR style.",
-        "shakespeare": "Rewrite the weather forecast in the style of William Shakespeare, with old English flair. Very short, TLDR.",
-        "pirate": "Describe the weather as if you're a pirate at sea. Arrr, matey! Keep it short, TLDR.",
         "haiku": "Write the weather forecast as a short haiku. Minimal and poetic.",
-        "yoda": "Summarize the weather in the voice of Yoda. Wise, you must be. Short, it should be.",
         "cowboy": "Summarize the weather like an old cowboy talking to his horse. Keep it short and rugged.",
         "villain": "Summarize the weather as a dramatic villain plotting world domination. Keep it short and diabolical.",
         "zen_master": "Summarize the weather like a Zen master sharing wisdom. Be very concise, yet profound.",
