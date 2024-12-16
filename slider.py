@@ -88,7 +88,6 @@ def get_tldr_forecast(weather_data, style="random"):
     styles = [
         "poem",
         "haiku",
-        "cowboy",
         "zen_master",
     ]
 
@@ -98,7 +97,6 @@ def get_tldr_forecast(weather_data, style="random"):
     style_prompts = {
         "poem": "Turn the weather forecast into a very short whimsical poem. Be concise and short.",
         "haiku": "Write the weather forecast as a short haiku. Minimal and poetic.",
-        "cowboy": "Summarize the weather like an old cowboy talking to his horse. Keep it very short and rugged, and use obscure references.",
         "zen_master": "Summarize the weather like a Zen master sharing wisdom. Be very concise, yet profound, straight to the point.",
     }
 
