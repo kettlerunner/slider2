@@ -1054,7 +1054,6 @@ def main():
     style_titles = {
         "poem": "Today's Forecast in Verse",
         "haiku": "Today's Haiku Forecast",
-        "cowboy": "Today's Frontier Forecast",
         "zen_master": "Today's Zencast"
     }
     for file in files:
