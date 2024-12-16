@@ -8,7 +8,6 @@ import cv2
 import numpy as np
 import math
 from datetime import datetime, timedelta
-import ctypes
 import requests
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -22,14 +21,6 @@ from collections import defaultdict
 from svglib.svglib import svg2rlg
 from reportlab.graphics import renderPM
 
-def hide_cursor():
-    # Hides the mouse cursor
-    ctypes.windll.user32.ShowCursor(False)
-
-def show_cursor():
-    # Shows the mouse cursor
-    ctypes.windll.user32.ShowCursor(True)
-    
 def sanitize_text(text):
     # Replace common problematic characters
     replacements = {
@@ -1054,7 +1045,6 @@ def save_local_metadata(metadata_file, metadata):
 
 def main():
     service = authenticate_drive()
-    hide_cursor()
     folder_id = '1hpBzZ_kiXpIBtRv1FN3da8zOhT5J0Ggi'  # Replace with your folder ID
     files = list_files_in_folder(service, folder_id)
     temp_dir = 'images'
@@ -1194,7 +1184,6 @@ def main():
         frame_with_overlay = add_time_overlay(current_img, temp, weather)
         cv2.imshow('slideshow', frame_with_overlay)
         if cv2.waitKey(display_time * 1000) == ord('q'):
-            show_cursor()
             cv2.destroyAllWindows()
             exit()
 
@@ -1203,14 +1192,12 @@ def main():
             frame_with_overlay = add_time_overlay(frame, temp, weather)
             cv2.imshow('slideshow', frame_with_overlay)
             if cv2.waitKey(1) == ord('q'):
-                show_cursor()
                 cv2.destroyAllWindows()
                 exit()
 
         frame_with_overlay = add_time_overlay(next_img, temp, weather)
         cv2.imshow('slideshow', frame_with_overlay)
         if cv2.waitKey(display_time * 1000) == ord('q'):
-            show_cursor()
             cv2.destroyAllWindows()
             exit()
 
