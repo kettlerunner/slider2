@@ -19,6 +19,7 @@ import re
 from collections import defaultdict
 from svglib.svglib import svg2rlg
 from reportlab.graphics import renderPM
+from zoneinfo import ZoneInfo
 
 def sanitize_text(text):
     # Replace common problematic characters
@@ -1116,11 +1117,20 @@ def main():
     forecast = get_weather_forecast(api_key)
     #news = get_ai_generated_news()
     while True:
-        
+        # Get the current time in Central Time
+        central_time = datetime.now(ZoneInfo("America/Chicago"))
+        current_hour = central_time.hour
+                
         temp, weather = get_weather_data(api_key)
         
-        # Randomly choose display type: single image, stitched images, or quote
-        display_type = random.choice(["single", "stitch", "quote", "forecast", "today"])
+        # Determine valid display types based on time
+        if 6 <= current_hour < 20:  # Between 6 AM and 8 PM
+            valid_display_types = ["single", "stitch", "quote", "forecast", "today"]
+        else:  # Between 8 PM and 6 AM
+            valid_display_types = ["single", "stitch", "quote", "forecast"]
+    
+        # Randomly choose display type from valid options
+        display_type = random.choice(valid_display_types)
         
         if display_type == "forecast":
             single_image = images[(index + 1) % len(images)]
