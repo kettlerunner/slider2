@@ -1117,15 +1117,19 @@ def main():
     forecast = get_weather_forecast(api_key)
     #news = get_ai_generated_news()
     while True:
-        # Get the current time in Central Time
+        # Get the current hour and day of the week
         central_time = datetime.now(ZoneInfo("America/Chicago"))
-        current_hour = central_time.hour
+        current_hour = datetime.now().hour
+        current_day = datetime.now().weekday()  # Monday is 0 and Sunday is 6
                 
         temp, weather = get_weather_data(api_key)
         
-        # Determine valid display types based on time
+        # Determine valid display types based on time and day of the week
         if 6 <= current_hour < 20:  # Between 6 AM and 8 PM
-            valid_display_types = ["single", "stitch", "quote", "forecast", "today"]
+            if current_day < 5:  # Monday to Friday
+                valid_display_types = ["single", "stitch", "quote", "forecast", "today"]
+            else:  # Saturday and Sunday
+                valid_display_types = ["single", "stitch", "quote", "forecast"]
         else:  # Between 8 PM and 6 AM
             valid_display_types = ["single", "stitch", "quote", "forecast"]
     
