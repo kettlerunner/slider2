@@ -1125,7 +1125,7 @@ def main():
         temp, weather = get_weather_data(api_key)
         
         # Determine valid display types based on time and day of the week
-        if 6 <= current_hour < 20:  # Between 6 AM and 8 PM
+        if 7 <= current_hour < 18:  # Between 6 AM and 8 PM
             if current_day < 5:  # Monday to Friday
                 valid_display_types = ["single", "stitch", "quote", "forecast", "today"]
             else:  # Saturday and Sunday
