@@ -111,7 +111,7 @@ def get_tldr_forecast(weather_data, style="random"):
 
     try:
         completion = client.chat.completions.create(
-            model="gpt-4o",
+            model="o3-mini",
             messages=[
                 {"role": "user", "content": prompt}
             ]
