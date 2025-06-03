@@ -53,6 +53,10 @@ client = OpenAI(api_key=openai_key)
 # If modifying these SCOPES, delete the file token.json.
 SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 
+# Supported media extensions
+image_extensions = ('.png', '.jpg', '.jpeg', '.bmp', '.gif')
+video_extensions = ('.mp4', '.mov', '.avi', '.mkv', '.webm')
+
 def get_weather_forecast2(api_key, city="Waupun", country_code="US"):
     """Fetches the weather forecast for the day from OpenWeatherMap API."""
     url = f"http://api.openweathermap.org/data/2.5/forecast?q={city},{country_code}&units=imperial&appid={api_key}"
@@ -1030,6 +1034,49 @@ def add_quote_overlay(frame, quote, source="", title=None, style=None):
     except Exception as e:
         print(f"Error adding quote overlay: {e}")
         return frame
+
+# Video utility functions
+def get_first_frame(video_path):
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return None
+    ret, frame = cap.read()
+    cap.release()
+    if not ret:
+        return None
+    if frame.shape[2] == 3:
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2BGRA)
+    frame = resize_and_pad(frame, frame_width, frame_height)
+    return frame
+
+
+def play_video(video_path, temp, weather):
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"Could not open video {video_path}")
+        return get_first_frame(video_path)
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps <= 1:
+        fps = 30
+    wait = int(1000 / fps)
+
+    last_frame = None
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame = resize_and_pad(frame, frame_width, frame_height)
+        last_frame = frame.copy()
+        overlay = add_time_overlay(frame, temp, weather)
+        cv2.imshow('slideshow', overlay)
+        if cv2.waitKey(wait) == ord('q'):
+            cap.release()
+            cv2.destroyAllWindows()
+            exit()
+
+    cap.release()
+    return last_frame if last_frame is not None else get_first_frame(video_path)
         
 def load_local_metadata(metadata_file):
     if os.path.exists(metadata_file):
@@ -1051,7 +1098,7 @@ def main():
 
     metadata_file = 'metadata.json'
     local_metadata = load_local_metadata(metadata_file)
-    images = []
+    media_items = []
     style_titles = {
         "poem": "Today's Forecast in Verse",
         "haiku": "Today's Haiku Forecast",
@@ -1066,35 +1113,44 @@ def main():
             'size': file.get('size', 0)
         }
 
+        ext = os.path.splitext(file_name)[1].lower()
+
         if file_name in local_metadata:
             local_file_metadata = local_metadata[file_name]
             if (local_file_metadata['modifiedTime'] == file_metadata['modifiedTime'] and
                 local_file_metadata['size'] == file_metadata['size']):
-                #print(f"Skipping download of unchanged file: {file_name}")
-                img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
-                if img is not None:
-                    if img.shape[2] == 3:
-                        img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
-                    images.append(img)
+                if ext in image_extensions:
+                    img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+                    if img is not None:
+                        if img.shape[2] == 3:
+                            img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+                        media_items.append({'type': 'image', 'data': img})
+                elif ext in video_extensions:
+                    media_items.append({'type': 'video', 'data': file_path})
                 continue
 
         print(f"Downloading file: {file_name}")
         download_file(service, file['id'], file_path)
-        img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
-        if img is not None:
-            if img.shape[2] == 3:
-                img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
-            images.append(img)
+        if ext in image_extensions:
+            img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+            if img is not None:
+                if img.shape[2] == 3:
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+                media_items.append({'type': 'image', 'data': img})
+        elif ext in video_extensions:
+            media_items.append({'type': 'video', 'data': file_path})
 
         local_metadata[file_name] = file_metadata
 
     save_local_metadata(metadata_file, local_metadata)
 
-    if not images:
-        print("No images found in the folder.")
+    if not media_items:
+        print("No media found in the folder.")
         exit()
 
-    random.shuffle(images)
+    images_only = [item['data'] for item in media_items if item['type'] == 'image']
+
+    random.shuffle(media_items)
 
     # Modify the window creation and properties
     cv2.namedWindow('slideshow', cv2.WINDOW_NORMAL)
@@ -1113,7 +1169,11 @@ def main():
     ]
 
     index = 0
-    current_img = resize_and_pad(images[index], frame_width, frame_height)
+    current_item = media_items[index]
+    if current_item['type'] == 'image':
+        current_img = resize_and_pad(current_item['data'], frame_width, frame_height)
+    else:
+        current_img = get_first_frame(current_item['data'])
     forecast = get_weather_forecast(api_key)
     #news = get_ai_generated_news()
     while True:
@@ -1124,78 +1184,81 @@ def main():
                 
         temp, weather = get_weather_data(api_key)
         
-        # Determine valid display types based on time and day of the week
-        if 7 <= current_hour < 18:  # Between 6 AM and 8 PM
-            if current_day < 5:  # Monday to Friday
-                valid_display_types = ["single", "stitch", "quote", "forecast", "today"]
-            else:  # Saturday and Sunday
-                valid_display_types = ["single", "stitch", "quote", "forecast"]
-        else:  # Between 8 PM and 6 AM
-            valid_display_types = ["single", "stitch", "quote", "forecast"]
-    
-        # Randomly choose display type from valid options
-        display_type = random.choice(valid_display_types)
-        
-        if display_type == "forecast":
-            single_image = images[(index + 1) % len(images)]
-            next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
-            next_img = add_forecast_overlay(next_img, forecast)
-        elif display_type == "news":
-            single_image = images[(index + 1) % len(images)]
-            next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
-            news = get_ai_generated_news()
-            next_img = add_news_overlay(next_img, news)
-        elif display_type == "stitch":
-            stitch_count = random.randint(2, 4)
-            stitch_indices = random.sample(range(len(images)), stitch_count)
-            stitched_images = [images[i] for i in stitch_indices]
-            next_img = stitch_images(stitched_images, frame_width, frame_height)
-            if next_img.shape[2] == 4:
-                next_img = cv2.cvtColor(next_img, cv2.COLOR_BGRA2BGR)
-        elif display_type == "quote":
-            single_image = images[(index + 1) % len(images)]
-            next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
-            quote, source = get_random_quote()
-            next_img = add_quote_overlay(next_img, quote, source)
-        elif display_type == "today":
-            single_image = images[(index + 1) % len(images)]
-            next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
-            
-            city = "Waupun"
-            country_code = "US"
-            custom_title = ""
-            
-            # Step 1: Fetch Weather Data
-            weather_data = get_weather_forecast2(api_key, city, country_code)
-            
-            # Step 2: Generate TL;DR Summary
-            if weather_data:
-                forecast_summary, style_used = get_tldr_forecast(weather_data)
-                # Now you have both the generated summary and the style used
-                custom_title = style_titles.get(style_used, "Today's Forecast")
-            else:
-                print("No weather data available.")
+        next_index = (index + 1) % len(media_items)
+        next_item = media_items[next_index]
 
-            next_img = add_quote_overlay(
-                next_img, 
-                quote=forecast_summary, 
-                source="Today's Weather", 
-                title=custom_title, 
-                style=None  # No style line
-            )
+        if next_item['type'] == 'video':
+            display_type = 'video'
+            next_img = get_first_frame(next_item['data'])
         else:
-            single_image = images[(index + 1) % len(images)]
-            next_img = create_single_image_with_background(single_image, frame_width, frame_height)
+            # Determine valid display types based on time and day of the week
+            if 7 <= current_hour < 18:
+                if current_day < 5:
+                    valid_display_types = ["single", "stitch", "quote", "forecast", "today"]
+                else:
+                    valid_display_types = ["single", "stitch", "quote", "forecast"]
+            else:
+                valid_display_types = ["single", "stitch", "quote", "forecast"]
+
+            display_type = random.choice(valid_display_types)
+
+            if display_type == "forecast":
+                single_image = next_item['data']
+                next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
+                next_img = add_forecast_overlay(next_img, forecast)
+            elif display_type == "stitch":
+                stitch_count = random.randint(2, 4)
+                if len(images_only) >= stitch_count:
+                    stitch_pool = random.sample(images_only, stitch_count)
+                else:
+                    stitch_pool = images_only
+                next_img = stitch_images(stitch_pool, frame_width, frame_height)
+                if next_img.shape[2] == 4:
+                    next_img = cv2.cvtColor(next_img, cv2.COLOR_BGRA2BGR)
+            elif display_type == "quote":
+                single_image = next_item['data']
+                next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
+                quote, source = get_random_quote()
+                next_img = add_quote_overlay(next_img, quote, source)
+            elif display_type == "today":
+                single_image = next_item['data']
+                next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
+
+                city = "Waupun"
+                country_code = "US"
+                custom_title = ""
+
+                weather_data = get_weather_forecast2(api_key, city, country_code)
+
+                if weather_data:
+                    forecast_summary, style_used = get_tldr_forecast(weather_data)
+                    custom_title = style_titles.get(style_used, "Today's Forecast")
+                else:
+                    print("No weather data available.")
+
+                next_img = add_quote_overlay(
+                    next_img,
+                    quote=forecast_summary,
+                    source="Today's Weather",
+                    title=custom_title,
+                    style=None
+                )
+            else:
+                single_image = next_item['data']
+                next_img = create_single_image_with_background(single_image, frame_width, frame_height)
     
         # Update forecast and news periodically (e.g., every hour), This should update the file. Not sure why these don't stick
         if datetime.now().minute == 0:
             forecast = get_weather_forecast(api_key)
 
-        frame_with_overlay = add_time_overlay(current_img, temp, weather)
-        cv2.imshow('slideshow', frame_with_overlay)
-        if cv2.waitKey(display_time * 1000) == ord('q'):
-            cv2.destroyAllWindows()
-            exit()
+        if current_item['type'] == 'video':
+            current_img = play_video(current_item['data'], temp, weather)
+        else:
+            frame_with_overlay = add_time_overlay(current_img, temp, weather)
+            cv2.imshow('slideshow', frame_with_overlay)
+            if cv2.waitKey(display_time * 1000) == ord('q'):
+                cv2.destroyAllWindows()
+                exit()
 
         transition = random.choice(transitions)
         for frame in transition(current_img, next_img, num_transition_frames):
@@ -1205,14 +1268,18 @@ def main():
                 cv2.destroyAllWindows()
                 exit()
 
-        frame_with_overlay = add_time_overlay(next_img, temp, weather)
-        cv2.imshow('slideshow', frame_with_overlay)
-        if cv2.waitKey(display_time * 1000) == ord('q'):
-            cv2.destroyAllWindows()
-            exit()
+        if next_item['type'] == 'video':
+            current_img = play_video(next_item['data'], temp, weather)
+        else:
+            frame_with_overlay = add_time_overlay(next_img, temp, weather)
+            cv2.imshow('slideshow', frame_with_overlay)
+            if cv2.waitKey(display_time * 1000) == ord('q'):
+                cv2.destroyAllWindows()
+                exit()
+            current_img = next_img
 
-        current_img = next_img
-        index = (index + 1) % len(images)
+        current_item = next_item
+        index = next_index
 
 if __name__ == '__main__':
     main()
