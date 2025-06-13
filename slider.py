@@ -24,13 +24,13 @@ from zoneinfo import ZoneInfo
 def sanitize_text(text):
     # Replace common problematic characters
     replacements = {
-        '"': '"',
-        '"': '"',
-        ''': "'",
-        ''': "'",
-        '–': '-',
-        '—': '-',
-        '…': '...'
+        "“": '"',
+        "”": '"',
+        "‘": "'",
+        "’": "'",
+        "–": '-',
+        "—": '-',
+        "…": '...'
     }
     for old, new in replacements.items():
         text = text.replace(old, new)
