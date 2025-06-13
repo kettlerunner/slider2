@@ -22,15 +22,15 @@ from reportlab.graphics import renderPM
 from zoneinfo import ZoneInfo
 
 def sanitize_text(text):
-    # Replace common problematic characters
+    """Normalize smart quotes and dashes to simple ASCII equivalents."""
     replacements = {
-        '"': '"',
-        '"': '"',
-        ''': "'",
-        ''': "'",
-        '–': '-',
-        '—': '-',
-        '…': '...'
+        "“": '"',  # left double quote
+        "”": '"',  # right double quote
+        "‘": "'",  # left single quote
+        "’": "'",  # right single quote
+        "–": '-',  # en dash
+        "—": '-',  # em dash
+        "…": '...',  # ellipsis
     }
     for old, new in replacements.items():
         text = text.replace(old, new)
@@ -1235,6 +1235,8 @@ def main():
                     custom_title = style_titles.get(style_used, "Today's Forecast")
                 else:
                     print("No weather data available.")
+                    forecast_summary = "Weather data unavailable."
+                    custom_title = "Today's Forecast"
 
                 next_img = add_quote_overlay(
                     next_img,
