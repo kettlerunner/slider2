@@ -1179,8 +1179,8 @@ def main():
     while True:
         # Get the current hour and day of the week
         central_time = datetime.now(ZoneInfo("America/Chicago"))
-        current_hour = datetime.now().hour
-        current_day = datetime.now().weekday()  # Monday is 0 and Sunday is 6
+        current_hour = central_time.hour
+        current_day = central_time.weekday()  # Monday is 0 and Sunday is 6
                 
         temp, weather = get_weather_data(api_key)
         
