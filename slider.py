@@ -1247,7 +1247,7 @@ def main():
                 single_image = next_item['data']
                 next_img = create_single_image_with_background(single_image, frame_width, frame_height)
     
-        # Update forecast and news periodically (e.g., every hour), This should update the file. Not sure why these don't stick
+        # Refresh the forecast periodically (about once an hour)
         if datetime.now().minute == 0:
             forecast = get_weather_forecast(api_key)
 
