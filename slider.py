@@ -24,10 +24,10 @@ from zoneinfo import ZoneInfo
 def sanitize_text(text):
     # Replace common problematic characters
     replacements = {
-        '"': '"',
-        '"': '"',
-        ''': "'",
-        ''': "'",
+        '“': '"',
+        '”': '"',
+        '‘': "'",
+        '’': "'",
         '–': '-',
         '—': '-',
         '…': '...'
