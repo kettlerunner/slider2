@@ -1179,8 +1179,8 @@ def main():
     while True:
         # Get the current hour and day of the week
         central_time = datetime.now(ZoneInfo("America/Chicago"))
-        current_hour = datetime.now().hour
-        current_day = datetime.now().weekday()  # Monday is 0 and Sunday is 6
+        current_hour = central_time.hour
+        current_day = central_time.weekday()  # Monday is 0 and Sunday is 6
                 
         temp, weather = get_weather_data(api_key)
         
@@ -1247,7 +1247,7 @@ def main():
                 single_image = next_item['data']
                 next_img = create_single_image_with_background(single_image, frame_width, frame_height)
     
-        # Update forecast and news periodically (e.g., every hour), This should update the file. Not sure why these don't stick
+        # Refresh the forecast periodically (about once an hour)
         if datetime.now().minute == 0:
             forecast = get_weather_forecast(api_key)
 
