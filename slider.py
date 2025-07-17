@@ -1088,6 +1088,47 @@ def save_local_metadata(metadata_file, metadata):
     with open(metadata_file, 'w') as f:
         json.dump(metadata, f)
 
+def check_for_new_media(service, folder_id, temp_dir, metadata_file,
+                        local_metadata, media_items, images_only):
+    files = list_files_in_folder(service, folder_id)
+    updated = False
+    for file in files:
+        file_name = file['name']
+        file_path = os.path.join(temp_dir, file_name)
+        file_metadata = {
+            'name': file_name,
+            'modifiedTime': file['modifiedTime'],
+            'size': file.get('size', 0)
+        }
+
+        ext = os.path.splitext(file_name)[1].lower()
+
+        if file_name in local_metadata:
+            local_file_metadata = local_metadata[file_name]
+            if (local_file_metadata['modifiedTime'] == file_metadata['modifiedTime'] and
+                    local_file_metadata['size'] == file_metadata['size']):
+                continue
+
+        print(f"Downloading file: {file_name}")
+        download_file(service, file['id'], file_path)
+        if ext in image_extensions:
+            img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+            if img is not None:
+                if img.shape[2] == 3:
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+                media_items.append({'type': 'image', 'data': img})
+                images_only.append(img)
+        elif ext in video_extensions:
+            media_items.append({'type': 'video', 'data': file_path})
+
+        local_metadata[file_name] = file_metadata
+        updated = True
+
+    if updated:
+        save_local_metadata(metadata_file, local_metadata)
+
+    return updated
+
 def main():
     service = authenticate_drive()
     folder_id = '1hpBzZ_kiXpIBtRv1FN3da8zOhT5J0Ggi'  # Replace with your folder ID
@@ -1177,6 +1218,15 @@ def main():
     forecast = get_weather_forecast(api_key)
     #news = get_ai_generated_news()
     while True:
+        check_for_new_media(
+            service,
+            folder_id,
+            temp_dir,
+            metadata_file,
+            local_metadata,
+            media_items,
+            images_only,
+        )
         # Get the current hour and day of the week
         central_time = datetime.now(ZoneInfo("America/Chicago"))
         current_hour = central_time.hour
