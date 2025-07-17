@@ -57,7 +57,7 @@ SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 image_extensions = ('.png', '.jpg', '.jpeg', '.bmp', '.gif')
 video_extensions = ('.mp4', '.mov', '.avi', '.mkv', '.webm')
 
-def get_weather_forecast2(api_key, city="Waupun", country_code="US"):
+def get_weather_forecast2(api_key, city="Fond du Lac", country_code="US"):
     """Fetches the weather forecast for the day from OpenWeatherMap API."""
     url = f"http://api.openweathermap.org/data/2.5/forecast?q={city},{country_code}&units=imperial&appid={api_key}"
     response = requests.get(url)
