@@ -126,7 +126,7 @@ def get_tldr_forecast(weather_data, style="random"):
         print(f"Error generating forecast summary: {e}")
         return f"Could not generate forecast summary in {style} style.", style
 
-def get_weather_forecast(api_key, city="Waupun", country_code="US"):
+def get_weather_forecast(api_key, city="Fond du Lac", country_code="US"):
     url = f"http://api.openweathermap.org/data/2.5/forecast?q={city},{country_code}&units=imperial&appid={api_key}"
     response = requests.get(url)
     if response.status_code == 200:
@@ -1196,9 +1196,9 @@ def main():
                 if current_day < 5:
                     valid_display_types = ["single", "stitch", "quote", "forecast", "today"]
                 else:
-                    valid_display_types = ["single", "stitch", "quote", "forecast"]
+                    valid_display_types = ["single", "stitch", "quote", "forecast", "today"] # remove the "today" and it will only show during the day, during the week
             else:
-                valid_display_types = ["single", "stitch", "quote", "forecast"]
+                valid_display_types = ["single", "stitch", "quote", "forecast", "today"]
 
             display_type = random.choice(valid_display_types)
 
