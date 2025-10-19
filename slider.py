@@ -157,9 +157,36 @@ def ensure_fullscreen(window_name):
     except cv2.error as exc:
         print(f"Failed to enforce fullscreen for '{window_name}': {exc}")
 
+def normalize_frame_for_display(frame, enforce_size=True):
+    """Normalize frame data so every render is consistent for fullscreen playback."""
+    if frame is None:
+        return None
+
+    normalized = frame
+
+    if normalized.dtype != np.uint8:
+        normalized = np.clip(normalized, 0, 255).astype(np.uint8)
+
+    if normalized.ndim == 2:
+        normalized = cv2.cvtColor(normalized, cv2.COLOR_GRAY2BGR)
+    elif normalized.ndim == 3:
+        channels = normalized.shape[2]
+        if channels == 1:
+            normalized = cv2.cvtColor(normalized, cv2.COLOR_GRAY2BGR)
+        elif channels == 4:
+            normalized = cv2.cvtColor(normalized, cv2.COLOR_BGRA2BGR)
+
+    if enforce_size and (normalized.shape[0] != frame_height or normalized.shape[1] != frame_width):
+        normalized = cv2.resize(normalized, (frame_width, frame_height))
+
+    return np.ascontiguousarray(normalized)
+
 def show_frame(window_name, frame):
     """Display a frame and re-assert fullscreen for environments that drop it."""
-    cv2.imshow(window_name, frame)
+    prepared_frame = normalize_frame_for_display(frame)
+    if prepared_frame is None:
+        return
+    cv2.imshow(window_name, prepared_frame)
     ensure_fullscreen(window_name)
 
 def get_weather_forecast(api_key, city="Fond du Lac", country_code="US"):
@@ -270,6 +297,9 @@ def get_ai_generated_news():
 
 def add_forecast_overlay(frame, forecast):
     try:
+        frame = normalize_frame_for_display(frame, enforce_size=False)
+        if frame is None:
+            return None
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 0.5
         font_color = (255, 255, 255)
@@ -955,6 +985,9 @@ def create_single_image_with_background(image, width, height):
 
 def add_time_overlay(frame, temp, weather):
     try:
+        frame = normalize_frame_for_display(frame, enforce_size=False)
+        if frame is None:
+            return None
         time_text = datetime.now().strftime("%B %d %Y, %I:%M %p")
         weather_text = f"Temp: {temp:.1f} F" if temp is not None else "Weather data unavailable"
         if weather:
@@ -1011,6 +1044,9 @@ def get_random_quote(quotes_file='quotes.json'):
 
 def add_quote_overlay(frame, quote, source="", title=None, style=None):
     try:
+        frame = normalize_frame_for_display(frame, enforce_size=False)
+        if frame is None:
+            return None
         MIN_BOX_WIDTH = 600  # Ensure a minimum width
 
         # Sanitize text
