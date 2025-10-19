@@ -1591,6 +1591,12 @@ def run_slideshow_once():
 
         play_queue = build_play_queue(media_items, index)
 
+        # When a video has just finished playing we want to avoid immediately
+        # replaying it on the next loop iteration. This flag lets us skip a
+        # redundant playback pass for the current item while still allowing
+        # videos to loop normally when they are the only media item available.
+        skip_current_video_playback = False
+
         forecast = get_weather_forecast(api_key)
         if forecast is None:
             forecast = []
@@ -1686,12 +1692,19 @@ def run_slideshow_once():
                         forecast = refreshed
 
                 if current_item['type'] == 'video':
-                    last_frame, quit_requested = play_video(current_item['data'], temp, weather)
-                    if quit_requested:
-                        exit_requested = True
-                        break
-                    if last_frame is not None:
-                        current_img = last_frame
+                    if skip_current_video_playback:
+                        # This video was just played during the previous
+                        # iteration. Skip replaying it immediately and clear
+                        # the flag so future loops can play the video again
+                        # when appropriate.
+                        skip_current_video_playback = False
+                    else:
+                        last_frame, quit_requested = play_video(current_item['data'], temp, weather)
+                        if quit_requested:
+                            exit_requested = True
+                            break
+                        if last_frame is not None:
+                            current_img = last_frame
                 else:
                     frame_with_overlay = add_time_overlay(current_img, temp, weather)
                     show_frame('slideshow', frame_with_overlay)
@@ -1714,12 +1727,34 @@ def run_slideshow_once():
                         break
 
                 if next_item['type'] == 'video':
-                    last_frame, quit_requested = play_video(next_item['data'], temp, weather)
-                    if quit_requested:
-                        exit_requested = True
-                        break
-                    current_img = last_frame if last_frame is not None else prepare_initial_frame(next_item)
+                    # Avoid playing the exact same video twice in a row. When
+                    # there is only one media item we allow the normal loop to
+                    # handle replaying it at the start of the next iteration.
+                    should_play_next_video = True
+                    if next_index == index:
+                        should_play_next_video = False
+                    if not has_multiple_items:
+                        should_play_next_video = False
+
+                    if should_play_next_video:
+                        last_frame, quit_requested = play_video(next_item['data'], temp, weather)
+                        if quit_requested:
+                            exit_requested = True
+                            break
+                        if last_frame is not None:
+                            current_img = last_frame
+                            skip_current_video_playback = True
+                        else:
+                            fallback_frame = next_img if next_img is not None else prepare_initial_frame(next_item)
+                            if fallback_frame is not None:
+                                current_img = fallback_frame
+                            skip_current_video_playback = False
+                    else:
+                        if next_img is not None:
+                            current_img = next_img
+                        skip_current_video_playback = False
                 else:
+                    skip_current_video_playback = False
                     frame_with_overlay = add_time_overlay(next_img, temp, weather)
                     show_frame('slideshow', frame_with_overlay)
                     if cv2.waitKey(display_time * 1000) == ord('q'):
