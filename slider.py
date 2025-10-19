@@ -3,6 +3,8 @@ import os
 import io
 import json
 import random
+import time
+import traceback
 import cv2
 import numpy as np
 import math
@@ -1269,6 +1271,14 @@ def save_local_metadata(metadata_file, metadata):
     except OSError as exc:
         print(f"Failed to save metadata: {exc}")
 
+def build_play_queue(media_items, current_index):
+    total_items = len(media_items)
+    if total_items <= 1:
+        return []
+    indices = [i for i in range(total_items) if i != current_index]
+    random.shuffle(indices)
+    return indices
+
 def refresh_media_items(service, folder_id, temp_dir, metadata_file, local_metadata):
     if service is None:
         return None, local_metadata, set()
@@ -1408,6 +1418,8 @@ def main():
         print("Failed to prepare the initial media item.")
         return
 
+    play_queue = build_play_queue(media_items, index)
+
     forecast = get_weather_forecast(api_key)
     if forecast is None:
         forecast = []
@@ -1415,157 +1427,184 @@ def main():
     last_refresh_time = datetime.now()
 
     while True:
-        central_time = datetime.now(ZoneInfo("America/Chicago"))
-        current_hour = central_time.hour
-        current_day = central_time.weekday()
+        try:
+            central_time = datetime.now(ZoneInfo("America/Chicago"))
+            current_hour = central_time.hour
+            current_day = central_time.weekday()
 
-        temp, weather = get_weather_data(api_key)
+            temp, weather = get_weather_data(api_key)
 
-        has_multiple_items = len(media_items) > 1
-        if has_multiple_items:
-            next_index = (index + 1) % len(media_items)
-            next_item = media_items[next_index]
-        else:
-            next_index = index
-            next_item = current_item
-
-        if next_item['type'] == 'video':
-            display_type = 'video'
-            next_img = get_first_frame(next_item['data'])
-        else:
-            if 7 <= current_hour < 18:
-                if current_day < 5:
-                    valid_display_types = ["single", "stitch", "quote", "forecast", "today"]
+            has_multiple_items = len(media_items) > 1
+            if has_multiple_items:
+                if not play_queue or any(idx >= len(media_items) for idx in play_queue):
+                    play_queue = build_play_queue(media_items, index)
+                if play_queue:
+                    next_index = play_queue.pop(0)
                 else:
-                    valid_display_types = ["single", "stitch", "quote", "forecast", "today"]
+                    next_index = index
+                next_item = media_items[next_index]
             else:
-                valid_display_types = ["single", "stitch", "quote", "forecast", "today"]
+                next_index = index
+                next_item = current_item
 
-            display_type = random.choice(valid_display_types)
-            single_image = next_item['data']
-
-            if display_type == "forecast":
-                next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
-                next_img = add_forecast_overlay(next_img, forecast)
-            elif display_type == "stitch":
-                stitch_count = random.randint(2, 4)
-                if len(images_only) >= stitch_count:
-                    stitch_pool = random.sample(images_only, stitch_count)
-                elif images_only:
-                    stitch_pool = images_only
-                else:
-                    stitch_pool = [single_image]
-                next_img = stitch_images(stitch_pool, frame_width, frame_height)
-                if next_img is not None and next_img.ndim == 3 and next_img.shape[2] == 4:
-                    next_img = cv2.cvtColor(next_img, cv2.COLOR_BGRA2BGR)
-            elif display_type == "quote":
-                next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
-                quote, source = get_random_quote()
-                next_img = add_quote_overlay(next_img, quote, source)
-            elif display_type == "today":
-                next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
-
-                city = "Waupun"
-                country_code = "US"
-                custom_title = "Today's Forecast"
-
-                weather_data = get_weather_forecast2(api_key, city, country_code)
-
-                forecast_summary = "Weather data unavailable."
-                if weather_data:
-                    forecast_summary, style_used = get_tldr_forecast(weather_data)
-                    custom_title = style_titles.get(style_used, "Today's Forecast")
-                else:
-                    print("No weather data available.")
-
-                next_img = add_quote_overlay(
-                    next_img,
-                    quote=forecast_summary,
-                    source="Today's Weather",
-                    title=custom_title,
-                    style=None
-                )
+            if next_item['type'] == 'video':
+                display_type = 'video'
+                next_img = get_first_frame(next_item['data'])
             else:
-                next_img = create_single_image_with_background(single_image, frame_width, frame_height)
+                if 7 <= current_hour < 18:
+                    if current_day < 5:
+                        valid_display_types = ["single", "stitch", "quote", "forecast", "today"]
+                    else:
+                        valid_display_types = ["single", "stitch", "quote", "forecast", "today"]
+                else:
+                    valid_display_types = ["single", "stitch", "quote", "forecast", "today"]
 
-        if next_img is None:
-            next_img = prepare_initial_frame(next_item)
+                display_type = random.choice(valid_display_types)
+                single_image = next_item['data']
 
-        if datetime.now().minute == 0:
-            refreshed = get_weather_forecast(api_key)
-            if refreshed is not None:
-                forecast = refreshed
+                if display_type == "forecast":
+                    next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
+                    next_img = add_forecast_overlay(next_img, forecast)
+                elif display_type == "stitch":
+                    stitch_count = random.randint(2, 4)
+                    if len(images_only) >= stitch_count:
+                        stitch_pool = random.sample(images_only, stitch_count)
+                    elif images_only:
+                        stitch_pool = images_only
+                    else:
+                        stitch_pool = [single_image]
+                    next_img = stitch_images(stitch_pool, frame_width, frame_height)
+                    if next_img is not None and next_img.ndim == 3 and next_img.shape[2] == 4:
+                        next_img = cv2.cvtColor(next_img, cv2.COLOR_BGRA2BGR)
+                elif display_type == "quote":
+                    next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
+                    quote, source = get_random_quote()
+                    next_img = add_quote_overlay(next_img, quote, source)
+                elif display_type == "today":
+                    next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
 
-        if current_item['type'] == 'video':
-            last_frame = play_video(current_item['data'], temp, weather)
-            if last_frame is not None:
-                current_img = last_frame
-        else:
-            frame_with_overlay = add_time_overlay(current_img, temp, weather)
-            show_frame('slideshow', frame_with_overlay)
-            if cv2.waitKey(display_time * 1000) == ord('q'):
-                cv2.destroyAllWindows()
-                return
+                    city = "Waupun"
+                    country_code = "US"
+                    custom_title = "Today's Forecast"
 
-        if has_multiple_items:
-            transition = random.choice(transitions)
-            for frame in transition(current_img, next_img, num_transition_frames):
-                frame_with_overlay = add_time_overlay(frame, temp, weather)
+                    weather_data = get_weather_forecast2(api_key, city, country_code)
+
+                    forecast_summary = "Weather data unavailable."
+                    if weather_data:
+                        forecast_summary, style_used = get_tldr_forecast(weather_data)
+                        custom_title = style_titles.get(style_used, "Today's Forecast")
+                    else:
+                        print("No weather data available.")
+
+                    next_img = add_quote_overlay(
+                        next_img,
+                        quote=forecast_summary,
+                        source="Today's Weather",
+                        title=custom_title,
+                        style=None
+                    )
+                else:
+                    next_img = create_single_image_with_background(single_image, frame_width, frame_height)
+
+            if next_img is None:
+                next_img = prepare_initial_frame(next_item)
+
+            if datetime.now().minute == 0:
+                refreshed = get_weather_forecast(api_key)
+                if refreshed is not None:
+                    forecast = refreshed
+
+            if current_item['type'] == 'video':
+                last_frame = play_video(current_item['data'], temp, weather)
+                if last_frame is not None:
+                    current_img = last_frame
+            else:
+                frame_with_overlay = add_time_overlay(current_img, temp, weather)
                 show_frame('slideshow', frame_with_overlay)
-                if cv2.waitKey(1) == ord('q'):
+                if cv2.waitKey(display_time * 1000) == ord('q'):
                     cv2.destroyAllWindows()
                     return
 
-        if next_item['type'] == 'video':
-            last_frame = play_video(next_item['data'], temp, weather)
-            current_img = last_frame if last_frame is not None else prepare_initial_frame(next_item)
-        else:
-            frame_with_overlay = add_time_overlay(next_img, temp, weather)
-            show_frame('slideshow', frame_with_overlay)
-            if cv2.waitKey(display_time * 1000) == ord('q'):
-                cv2.destroyAllWindows()
-                return
-            current_img = next_img
+            if has_multiple_items and next_index != index:
+                transition = random.choice(transitions)
+                for frame in transition(current_img, next_img, num_transition_frames):
+                    frame_with_overlay = add_time_overlay(frame, temp, weather)
+                    show_frame('slideshow', frame_with_overlay)
+                    if cv2.waitKey(1) == ord('q'):
+                        cv2.destroyAllWindows()
+                        return
 
-        current_item = next_item
-        index = next_index
-
-        if datetime.now() - last_refresh_time >= MEDIA_REFRESH_INTERVAL:
-            refresh_result = refresh_media_items(service, folder_id, temp_dir, metadata_file, local_metadata)
-            last_refresh_time = datetime.now()
-            if refresh_result is None:
-                continue
-
-            refreshed_media, local_metadata, downloaded_files = refresh_result
-            if not refreshed_media:
-                print("No media found in the folder.")
-                cv2.destroyAllWindows()
-                return
-
-            media_items = refreshed_media
-            images_only = [item['data'] for item in media_items if item['type'] == 'image']
-
-            current_name = current_item.get('name')
-            prioritize_new = bool(downloaded_files)
-            available_names = {item['name'] for item in media_items}
-
-            if prioritize_new or current_name not in available_names:
-                index = 0
-                current_item = media_items[index]
-                refreshed_frame = prepare_initial_frame(current_item)
-                if refreshed_frame is not None:
-                    current_img = refreshed_frame
+            if next_item['type'] == 'video':
+                last_frame = play_video(next_item['data'], temp, weather)
+                current_img = last_frame if last_frame is not None else prepare_initial_frame(next_item)
             else:
-                index = next((i for i, item in enumerate(media_items) if item['name'] == current_name), 0)
-                current_item = media_items[index]
-                if current_item['type'] == 'video':
-                    refreshed_frame = get_first_frame(current_item['data'])
-                    if refreshed_frame is not None:
-                        current_img = refreshed_frame
-                elif current_item['name'] in downloaded_files:
+                frame_with_overlay = add_time_overlay(next_img, temp, weather)
+                show_frame('slideshow', frame_with_overlay)
+                if cv2.waitKey(display_time * 1000) == ord('q'):
+                    cv2.destroyAllWindows()
+                    return
+                current_img = next_img
+
+            current_item = next_item
+            index = next_index
+
+            if has_multiple_items:
+                play_queue = [idx for idx in play_queue if idx != index and idx < len(media_items)]
+
+            if datetime.now() - last_refresh_time >= MEDIA_REFRESH_INTERVAL:
+                refresh_result = refresh_media_items(service, folder_id, temp_dir, metadata_file, local_metadata)
+                last_refresh_time = datetime.now()
+                if refresh_result is None:
+                    continue
+
+                refreshed_media, local_metadata, downloaded_files = refresh_result
+                if not refreshed_media:
+                    print("No media found in the folder.")
+                    cv2.destroyAllWindows()
+                    return
+
+                media_items = refreshed_media
+                images_only = [item['data'] for item in media_items if item['type'] == 'image']
+
+                current_name = current_item.get('name')
+                prioritize_new = bool(downloaded_files)
+                available_names = {item['name'] for item in media_items}
+
+                if prioritize_new or current_name not in available_names:
+                    index = 0
+                    current_item = media_items[index]
                     refreshed_frame = prepare_initial_frame(current_item)
                     if refreshed_frame is not None:
                         current_img = refreshed_frame
+                else:
+                    index = next((i for i, item in enumerate(media_items) if item['name'] == current_name), 0)
+                    current_item = media_items[index]
+                    if current_item['type'] == 'video':
+                        refreshed_frame = get_first_frame(current_item['data'])
+                        if refreshed_frame is not None:
+                            current_img = refreshed_frame
+                    elif current_item['name'] in downloaded_files:
+                        refreshed_frame = prepare_initial_frame(current_item)
+                        if refreshed_frame is not None:
+                            current_img = refreshed_frame
+
+                play_queue = build_play_queue(media_items, index)
+        except KeyboardInterrupt:
+            cv2.destroyAllWindows()
+            return
+        except Exception as exc:
+            print(f"Unexpected error in slideshow loop: {exc}")
+            traceback.print_exc()
+            time.sleep(5)
+            if current_item['type'] == 'video':
+                recovered_frame = get_first_frame(current_item['data'])
+            else:
+                recovered_frame = prepare_initial_frame(current_item)
+            if recovered_frame is not None:
+                current_img = recovered_frame
+            play_queue = build_play_queue(media_items, index)
+            ensure_fullscreen('slideshow')
+            continue
 
 if __name__ == '__main__':
     main()
