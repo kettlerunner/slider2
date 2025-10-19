@@ -147,13 +147,30 @@ def get_tldr_forecast(weather_data, style="random"):
         print(f"Error generating forecast summary: {e}")
     return f"Could not generate forecast summary in {style} style.", style
 
+_window_fullscreen_state = {}
+
+
 def ensure_fullscreen(window_name):
     """Ensure the OpenCV window stays in fullscreen mode on constrained displays."""
     try:
         fullscreen_flag = getattr(cv2, "WINDOW_FULLSCREEN", 1)
-        cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, fullscreen_flag)
-        cv2.moveWindow(window_name, 0, 0)
-        cv2.resizeWindow(window_name, frame_width, frame_height)
+        window_state = _window_fullscreen_state.setdefault(window_name, {"is_fullscreen": False})
+
+        try:
+            property_value = cv2.getWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN)
+            is_fullscreen = int(property_value) == fullscreen_flag
+        except cv2.error:
+            # If the property cannot be read, assume we need to enforce fullscreen
+            is_fullscreen = False
+
+        if not is_fullscreen:
+            cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, fullscreen_flag)
+            cv2.moveWindow(window_name, 0, 0)
+            cv2.resizeWindow(window_name, frame_width, frame_height)
+            window_state["is_fullscreen"] = True
+        elif not window_state.get("is_fullscreen", False):
+            # The window is already fullscreen but we have not recorded it yet
+            window_state["is_fullscreen"] = True
     except cv2.error as exc:
         print(f"Failed to enforce fullscreen for '{window_name}': {exc}")
 
