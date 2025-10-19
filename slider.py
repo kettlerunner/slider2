@@ -52,6 +52,7 @@ api_key = os.getenv('WEATHERMAP_API_KEY')
 openai_key = os.getenv('OPENAI_API_KEY')
 
 REQUEST_TIMEOUT = 10  # seconds
+MEDIA_REFRESH_INTERVAL = timedelta(minutes=2)
 
 try:
     client = OpenAI(api_key=openai_key) if openai_key else None
@@ -429,16 +430,16 @@ def authenticate_drive():
 
 def list_files_in_folder(service, folder_id):
     if service is None:
-        return []
+        return None
     query = f"'{folder_id}' in parents"
     try:
         results = service.files().list(q=query, pageSize=100, fields="nextPageToken, files(id, name, modifiedTime, size)").execute()
     except HttpError as exc:
         print(f"Failed to list files: {exc}")
-        return []
+        return None
     except Exception as exc:
         print(f"Unexpected error listing files: {exc}")
-        return []
+        return None
     items = results.get('files', [])
     return items
 
@@ -462,6 +463,24 @@ def download_file(service, file_id, file_name):
         print(f"Unexpected error downloading file {file_id}: {exc}")
         return False
     return True
+
+def parse_modified_time(modified_time_str):
+    if not modified_time_str:
+        return datetime.min
+    try:
+        if modified_time_str.endswith('Z'):
+            modified_time_str = modified_time_str[:-1] + '+00:00'
+        return datetime.fromisoformat(modified_time_str)
+    except ValueError:
+        return datetime.min
+
+def prepare_initial_frame(media_item):
+    if media_item['type'] == 'video':
+        return get_first_frame(media_item['data'])
+    image = media_item['data']
+    if image is None:
+        return None
+    return resize_and_pad(image, frame_width, frame_height)
 
 def resize_and_pad(image, width, height):
     h, w = image.shape[:2]
@@ -1197,82 +1216,126 @@ def save_local_metadata(metadata_file, metadata):
     except OSError as exc:
         print(f"Failed to save metadata: {exc}")
 
+def refresh_media_items(service, folder_id, temp_dir, metadata_file, local_metadata):
+    if service is None:
+        return None, local_metadata, set()
+
+    files = list_files_in_folder(service, folder_id)
+    if files is None:
+        print("Skipping media refresh due to retrieval error.")
+        return None, local_metadata, set()
+
+    if not files:
+        save_local_metadata(metadata_file, {})
+        return [], {}, set()
+
+    os.makedirs(temp_dir, exist_ok=True)
+
+    sorted_files = sorted(
+        files,
+        key=lambda item: parse_modified_time(item.get('modifiedTime')),
+        reverse=True
+    )
+
+    updated_metadata = {}
+    media_items = []
+    downloaded_files = set()
+
+    for file in sorted_files:
+        file_name = file['name']
+        file_path = os.path.join(temp_dir, file_name)
+        remote_size = int(file.get('size', 0)) if file.get('size') is not None else 0
+        file_metadata = {
+            'modifiedTime': file.get('modifiedTime'),
+            'size': remote_size
+        }
+
+        ext = os.path.splitext(file_name)[1].lower()
+        if ext not in image_extensions + video_extensions:
+            continue
+
+        needs_download = False
+        local_file_metadata = local_metadata.get(file_name)
+        if local_file_metadata is None:
+            needs_download = True
+        else:
+            local_size = int(local_file_metadata.get('size', 0))
+            if (local_file_metadata.get('modifiedTime') != file_metadata['modifiedTime'] or
+                    local_size != file_metadata['size']):
+                needs_download = True
+            elif not os.path.exists(file_path):
+                needs_download = True
+
+        if needs_download:
+            print(f"Downloading file: {file_name}")
+            if not download_file(service, file['id'], file_path):
+                print(f"Skipping file due to download error: {file_name}")
+                continue
+            downloaded_files.add(file_name)
+
+        if ext in image_extensions:
+            img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+            if img is None:
+                print(f"Failed to load image: {file_name}")
+                continue
+            if len(img.shape) == 2:
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGRA)
+            elif img.shape[2] == 3:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+            media_items.append({
+                'type': 'image',
+                'data': img,
+                'name': file_name,
+                'modifiedTime': file_metadata['modifiedTime']
+            })
+        elif ext in video_extensions:
+            if not os.path.exists(file_path):
+                print(f"Video file missing after download: {file_name}")
+                continue
+            media_items.append({
+                'type': 'video',
+                'data': file_path,
+                'name': file_name,
+                'modifiedTime': file_metadata['modifiedTime']
+            })
+
+        updated_metadata[file_name] = file_metadata
+
+    save_local_metadata(metadata_file, updated_metadata)
+
+    return media_items, updated_metadata, downloaded_files
+
 def main():
     service = authenticate_drive()
     if service is None:
         print("Unable to authenticate with Google Drive.")
         return
     folder_id = '1hpBzZ_kiXpIBtRv1FN3da8zOhT5J0Ggi'  # Replace with your folder ID
-    files = list_files_in_folder(service, folder_id)
-    if not files:
-        print("No files retrieved from Google Drive.")
-        return
     temp_dir = 'images'
-    if not os.path.exists(temp_dir):
-        os.makedirs(temp_dir)
-
     metadata_file = 'metadata.json'
     local_metadata = load_local_metadata(metadata_file)
-    media_items = []
-    style_titles = {
-        "poem": "Today's Forecast in Verse",
-        "haiku": "Today's Haiku Forecast",
-        "zen_master": "Today's Zencast"
-    }
-    for file in files:
-        file_name = file['name']
-        file_path = os.path.join(temp_dir, file_name)
-        file_metadata = {
-            'name': file_name,
-            'modifiedTime': file['modifiedTime'],
-            'size': file.get('size', 0)
-        }
 
-        ext = os.path.splitext(file_name)[1].lower()
+    refresh_result = refresh_media_items(service, folder_id, temp_dir, metadata_file, local_metadata)
+    if refresh_result is None:
+        print("Unable to retrieve media from Google Drive.")
+        return
 
-        if file_name in local_metadata:
-            local_file_metadata = local_metadata[file_name]
-            if (local_file_metadata['modifiedTime'] == file_metadata['modifiedTime'] and
-                local_file_metadata['size'] == file_metadata['size']):
-                if ext in image_extensions:
-                    img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
-                    if img is not None:
-                        if img.shape[2] == 3:
-                            img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
-                        media_items.append({'type': 'image', 'data': img})
-                elif ext in video_extensions:
-                    media_items.append({'type': 'video', 'data': file_path})
-                continue
-
-        print(f"Downloading file: {file_name}")
-        if not download_file(service, file['id'], file_path):
-            print(f"Skipping file due to download error: {file_name}")
-            continue
-        if ext in image_extensions:
-            img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
-            if img is not None:
-                if img.shape[2] == 3:
-                    img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
-                media_items.append({'type': 'image', 'data': img})
-        elif ext in video_extensions:
-            media_items.append({'type': 'video', 'data': file_path})
-
-        local_metadata[file_name] = file_metadata
-
-    save_local_metadata(metadata_file, local_metadata)
-
+    media_items, local_metadata, downloaded_files = refresh_result
     if not media_items:
         print("No media found in the folder.")
         return
 
     images_only = [item['data'] for item in media_items if item['type'] == 'image']
 
-    random.shuffle(media_items)
+    style_titles = {
+        "poem": "Today's Forecast in Verse",
+        "haiku": "Today's Haiku Forecast",
+        "zen_master": "Today's Zencast"
+    }
 
-    # Modify the window creation and properties
     cv2.namedWindow('slideshow', cv2.WINDOW_NORMAL)
     ensure_fullscreen('slideshow')
-    
+
     transitions = [
         fade_transition,
         slide_transition_left,
@@ -1287,60 +1350,66 @@ def main():
 
     index = 0
     current_item = media_items[index]
-    if current_item['type'] == 'image':
-        current_img = resize_and_pad(current_item['data'], frame_width, frame_height)
-    else:
-        current_img = get_first_frame(current_item['data'])
+    current_img = prepare_initial_frame(current_item)
+    if current_img is None:
+        print("Failed to prepare the initial media item.")
+        return
+
     forecast = get_weather_forecast(api_key)
     if forecast is None:
         forecast = []
-    #news = get_ai_generated_news()
+
+    last_refresh_time = datetime.now()
+
     while True:
-        # Get the current hour and day of the week
         central_time = datetime.now(ZoneInfo("America/Chicago"))
         current_hour = central_time.hour
-        current_day = central_time.weekday()  # Monday is 0 and Sunday is 6
-                
+        current_day = central_time.weekday()
+
         temp, weather = get_weather_data(api_key)
-        
-        next_index = (index + 1) % len(media_items)
-        next_item = media_items[next_index]
+
+        has_multiple_items = len(media_items) > 1
+        if has_multiple_items:
+            next_index = (index + 1) % len(media_items)
+            next_item = media_items[next_index]
+        else:
+            next_index = index
+            next_item = current_item
 
         if next_item['type'] == 'video':
             display_type = 'video'
             next_img = get_first_frame(next_item['data'])
         else:
-            # Determine valid display types based on time and day of the week
             if 7 <= current_hour < 18:
                 if current_day < 5:
                     valid_display_types = ["single", "stitch", "quote", "forecast", "today"]
                 else:
-                    valid_display_types = ["single", "stitch", "quote", "forecast", "today"] # remove the "today" and it will only show during the day, during the week
+                    valid_display_types = ["single", "stitch", "quote", "forecast", "today"]
             else:
                 valid_display_types = ["single", "stitch", "quote", "forecast", "today"]
 
             display_type = random.choice(valid_display_types)
+            single_image = next_item['data']
 
             if display_type == "forecast":
-                single_image = next_item['data']
                 next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
                 next_img = add_forecast_overlay(next_img, forecast)
             elif display_type == "stitch":
                 stitch_count = random.randint(2, 4)
                 if len(images_only) >= stitch_count:
                     stitch_pool = random.sample(images_only, stitch_count)
-                else:
+                elif images_only:
                     stitch_pool = images_only
+                else:
+                    stitch_pool = [single_image]
                 next_img = stitch_images(stitch_pool, frame_width, frame_height)
-                if next_img.shape[2] == 4:
+                if next_img is not None and next_img.ndim == 3 and next_img.shape[2] == 4:
                     next_img = cv2.cvtColor(next_img, cv2.COLOR_BGRA2BGR)
             elif display_type == "quote":
-                single_image = next_item['data']
                 next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
                 quote, source = get_random_quote()
                 next_img = add_quote_overlay(next_img, quote, source)
             elif display_type == "today":
-                single_image = next_item['data']
                 next_img = create_zoomed_blurred_background(single_image, frame_width, frame_height)
 
                 city = "Waupun"
@@ -1364,44 +1433,86 @@ def main():
                     style=None
                 )
             else:
-                single_image = next_item['data']
                 next_img = create_single_image_with_background(single_image, frame_width, frame_height)
-    
-        # Refresh the forecast periodically (about once an hour)
+
+        if next_img is None:
+            next_img = prepare_initial_frame(next_item)
+
         if datetime.now().minute == 0:
             refreshed = get_weather_forecast(api_key)
             if refreshed is not None:
                 forecast = refreshed
 
         if current_item['type'] == 'video':
-            current_img = play_video(current_item['data'], temp, weather)
+            last_frame = play_video(current_item['data'], temp, weather)
+            if last_frame is not None:
+                current_img = last_frame
         else:
             frame_with_overlay = add_time_overlay(current_img, temp, weather)
             show_frame('slideshow', frame_with_overlay)
             if cv2.waitKey(display_time * 1000) == ord('q'):
                 cv2.destroyAllWindows()
-                exit()
+                return
 
-        transition = random.choice(transitions)
-        for frame in transition(current_img, next_img, num_transition_frames):
-            frame_with_overlay = add_time_overlay(frame, temp, weather)
-            show_frame('slideshow', frame_with_overlay)
-            if cv2.waitKey(1) == ord('q'):
-                cv2.destroyAllWindows()
-                exit()
+        if has_multiple_items:
+            transition = random.choice(transitions)
+            for frame in transition(current_img, next_img, num_transition_frames):
+                frame_with_overlay = add_time_overlay(frame, temp, weather)
+                show_frame('slideshow', frame_with_overlay)
+                if cv2.waitKey(1) == ord('q'):
+                    cv2.destroyAllWindows()
+                    return
 
         if next_item['type'] == 'video':
-            current_img = play_video(next_item['data'], temp, weather)
+            last_frame = play_video(next_item['data'], temp, weather)
+            current_img = last_frame if last_frame is not None else prepare_initial_frame(next_item)
         else:
             frame_with_overlay = add_time_overlay(next_img, temp, weather)
             show_frame('slideshow', frame_with_overlay)
             if cv2.waitKey(display_time * 1000) == ord('q'):
                 cv2.destroyAllWindows()
-                exit()
+                return
             current_img = next_img
 
         current_item = next_item
         index = next_index
+
+        if datetime.now() - last_refresh_time >= MEDIA_REFRESH_INTERVAL:
+            refresh_result = refresh_media_items(service, folder_id, temp_dir, metadata_file, local_metadata)
+            last_refresh_time = datetime.now()
+            if refresh_result is None:
+                continue
+
+            refreshed_media, local_metadata, downloaded_files = refresh_result
+            if not refreshed_media:
+                print("No media found in the folder.")
+                cv2.destroyAllWindows()
+                return
+
+            media_items = refreshed_media
+            images_only = [item['data'] for item in media_items if item['type'] == 'image']
+
+            current_name = current_item.get('name')
+            prioritize_new = bool(downloaded_files)
+            available_names = {item['name'] for item in media_items}
+
+            if prioritize_new or current_name not in available_names:
+                index = 0
+                current_item = media_items[index]
+                refreshed_frame = prepare_initial_frame(current_item)
+                if refreshed_frame is not None:
+                    current_img = refreshed_frame
+            else:
+                index = next((i for i, item in enumerate(media_items) if item['name'] == current_name), 0)
+                current_item = media_items[index]
+                if current_item['type'] == 'video':
+                    refreshed_frame = get_first_frame(current_item['data'])
+                    if refreshed_frame is not None:
+                        current_img = refreshed_frame
+                elif current_item['name'] in downloaded_files:
+                    refreshed_frame = prepare_initial_frame(current_item)
+                    if refreshed_frame is not None:
+                        current_img = refreshed_frame
 
 if __name__ == '__main__':
     main()
