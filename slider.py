@@ -62,6 +62,8 @@ REQUEST_TIMEOUT = 10  # seconds
 MEDIA_REFRESH_INTERVAL = timedelta(minutes=2)
 AI_CACHE_SUCCESS_TTL = timedelta(minutes=30)
 AI_CACHE_FAILURE_TTL = timedelta(minutes=5)
+NEWS_CACHE_SUCCESS_TTL = timedelta(minutes=15)
+NEWS_CACHE_FAILURE_TTL = timedelta(minutes=3)
 
 try:
     client = OpenAI(api_key=openai_key) if openai_key else None
@@ -73,6 +75,14 @@ _forecast_summary_cache = {
     "key": None,
     "expires": datetime.min,
     "value": ("Weather summary unavailable.", "random"),
+}
+
+_news_cache = {
+    "expires": datetime.min,
+    "value": {
+        "headline": "News unavailable",
+        "summary": "No updates retrieved yet.",
+    },
 }
 
 
@@ -491,6 +501,14 @@ def get_weather_icon(description):
         return icon_images.get('snow')
 
 def get_ai_generated_news():
+    """Retrieve a short AI-generated news blurb with aggressive timeouts.
+
+    The OpenAI SDK occasionally ignores request timeouts which can freeze the
+    slideshow loop. To prevent this, the request is routed through
+    ``_safe_chat_completion`` and cached so transient outages do not repeatedly
+    stall the playback.
+    """
+
     prompt = """
             Search for current technology, international, business, or economic news relevant to the last week or even today specifically. Dig sources available to you and respond with a compelling title and summary of the news that you are reporting.
 
@@ -504,26 +522,66 @@ def get_ai_generated_news():
             }
         """
 
-    if client is None:
-        return {"headline": "News unavailable", "summary": "Unable to contact OpenAI."}
+    fallback_value = {
+        "headline": "News unavailable",
+        "summary": "Unable to retrieve the latest update.",
+    }
 
-    try:
-        completion = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        
-        news_data = completion.choices[0].message.content.strip()
-        if news_data.startswith('```json'):
-            news_data = news_data[len('```json'):].strip()
-        if news_data.endswith('```'):
-            news_data = news_data[:-len('```')].strip()
-        
-        news_json = json.loads(news_data)
-        return news_json
-    except Exception as e:
-        print(f"Error generating news: {e}")
-        return {"headline": "Error generating news", "summary": "Please try again later."}
+    now = datetime.now()
+    cache_entry = _news_cache
+    if now < cache_entry["expires"]:
+        return cache_entry["value"]
+
+    if client is None:
+        _news_cache.update({
+            "expires": now + NEWS_CACHE_FAILURE_TTL,
+            "value": fallback_value,
+        })
+        return fallback_value
+
+    completion = _safe_chat_completion(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    if completion and completion.choices:
+        try:
+            news_data = completion.choices[0].message.content.strip()
+        except (AttributeError, IndexError):
+            news_data = ""
+
+        if news_data:
+            if news_data.startswith('```json'):
+                news_data = news_data[len('```json'):].strip()
+            if news_data.endswith('```'):
+                news_data = news_data[:-len('```')].strip()
+
+            try:
+                parsed = json.loads(news_data)
+            except json.JSONDecodeError as exc:
+                print(f"Failed to parse AI news response: {exc}")
+            else:
+                if isinstance(parsed, dict):
+                    headline = sanitize_text(str(parsed.get("headline", "")).strip())
+                    summary = sanitize_text(str(parsed.get("summary", "")).strip())
+                    if headline and summary:
+                        cache_value = {"headline": headline, "summary": summary}
+                        _news_cache.update({
+                            "expires": now + NEWS_CACHE_SUCCESS_TTL,
+                            "value": cache_value,
+                        })
+                        return cache_value
+                    else:
+                        print("AI news response was missing required text. Using fallback.")
+                print("AI news response did not contain the expected fields. Using fallback.")
+    else:
+        print("AI news request failed or returned no choices. Using fallback.")
+
+    _news_cache.update({
+        "expires": now + NEWS_CACHE_FAILURE_TTL,
+        "value": fallback_value,
+    })
+    return fallback_value
 
 def add_forecast_overlay(frame, forecast):
     try:
