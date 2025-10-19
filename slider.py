@@ -144,7 +144,22 @@ def get_tldr_forecast(weather_data, style="random"):
         return summary, style
     except Exception as e:
         print(f"Error generating forecast summary: {e}")
-        return f"Could not generate forecast summary in {style} style.", style
+    return f"Could not generate forecast summary in {style} style.", style
+
+def ensure_fullscreen(window_name):
+    """Ensure the OpenCV window stays in fullscreen mode on constrained displays."""
+    try:
+        fullscreen_flag = getattr(cv2, "WINDOW_FULLSCREEN", 1)
+        cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, fullscreen_flag)
+        cv2.moveWindow(window_name, 0, 0)
+        cv2.resizeWindow(window_name, frame_width, frame_height)
+    except cv2.error as exc:
+        print(f"Failed to enforce fullscreen for '{window_name}': {exc}")
+
+def show_frame(window_name, frame):
+    """Display a frame and re-assert fullscreen for environments that drop it."""
+    cv2.imshow(window_name, frame)
+    ensure_fullscreen(window_name)
 
 def get_weather_forecast(api_key, city="Fond du Lac", country_code="US"):
     if not api_key:
@@ -1157,7 +1172,7 @@ def play_video(video_path, temp, weather):
         frame = resize_and_pad(frame, frame_width, frame_height)
         last_frame = frame.copy()
         overlay = add_time_overlay(frame, temp, weather)
-        cv2.imshow('slideshow', overlay)
+        show_frame('slideshow', overlay)
         if cv2.waitKey(wait) == ord('q'):
             cap.release()
             cv2.destroyAllWindows()
@@ -1256,7 +1271,7 @@ def main():
 
     # Modify the window creation and properties
     cv2.namedWindow('slideshow', cv2.WINDOW_NORMAL)
-    cv2.setWindowProperty('slideshow', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    ensure_fullscreen('slideshow')
     
     transitions = [
         fade_transition,
@@ -1362,7 +1377,7 @@ def main():
             current_img = play_video(current_item['data'], temp, weather)
         else:
             frame_with_overlay = add_time_overlay(current_img, temp, weather)
-            cv2.imshow('slideshow', frame_with_overlay)
+            show_frame('slideshow', frame_with_overlay)
             if cv2.waitKey(display_time * 1000) == ord('q'):
                 cv2.destroyAllWindows()
                 exit()
@@ -1370,7 +1385,7 @@ def main():
         transition = random.choice(transitions)
         for frame in transition(current_img, next_img, num_transition_frames):
             frame_with_overlay = add_time_overlay(frame, temp, weather)
-            cv2.imshow('slideshow', frame_with_overlay)
+            show_frame('slideshow', frame_with_overlay)
             if cv2.waitKey(1) == ord('q'):
                 cv2.destroyAllWindows()
                 exit()
@@ -1379,7 +1394,7 @@ def main():
             current_img = play_video(next_item['data'], temp, weather)
         else:
             frame_with_overlay = add_time_overlay(next_img, temp, weather)
-            cv2.imshow('slideshow', frame_with_overlay)
+            show_frame('slideshow', frame_with_overlay)
             if cv2.waitKey(display_time * 1000) == ord('q'):
                 cv2.destroyAllWindows()
                 exit()
