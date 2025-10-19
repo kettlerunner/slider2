@@ -24,6 +24,7 @@ from googleapiclient.http import MediaIoBaseDownload
 from openai import OpenAI
 import textwrap
 import re
+import threading
 from collections import defaultdict
 from svglib.svglib import svg2rlg
 from reportlab.graphics import renderPM
@@ -59,12 +60,73 @@ openai_key = os.getenv('OPENAI_API_KEY')
 
 REQUEST_TIMEOUT = 10  # seconds
 MEDIA_REFRESH_INTERVAL = timedelta(minutes=2)
+AI_CACHE_SUCCESS_TTL = timedelta(minutes=30)
+AI_CACHE_FAILURE_TTL = timedelta(minutes=5)
 
 try:
     client = OpenAI(api_key=openai_key) if openai_key else None
 except Exception as exc:
     print(f"Failed to initialize OpenAI client: {exc}")
     client = None
+
+_forecast_summary_cache = {
+    "key": None,
+    "expires": datetime.min,
+    "value": ("Weather summary unavailable.", "random"),
+}
+
+
+def _safe_chat_completion(model, messages, timeout=REQUEST_TIMEOUT):
+    """Call OpenAI chat completions with a hard timeout.
+
+    The OpenAI Python SDK does not expose a reliable per-request timeout on
+    every version, so we optimistically try to pass the timeout argument. If
+    that fails, the request is executed in a background daemon thread and
+    joined with the same timeout to ensure the slideshow loop does not block
+    indefinitely when the network is slow or unavailable.
+    """
+
+    if client is None:
+        return None
+
+    try:
+        return client.chat.completions.create(
+            model=model,
+            messages=messages,
+            timeout=timeout,
+        )
+    except TypeError:
+        # Older SDK versions do not accept the timeout kwarg. Fall back to a
+        # manual timeout implementation using a background thread.
+        pass
+    except Exception as exc:
+        print(f"OpenAI request failed: {exc}")
+        return None
+
+    result_container = {}
+
+    def _request() -> None:
+        try:
+            result_container["value"] = client.chat.completions.create(
+                model=model,
+                messages=messages,
+            )
+        except Exception as exc:  # pragma: no cover - best effort logging
+            result_container["error"] = exc
+
+    thread = threading.Thread(target=_request, daemon=True)
+    thread.start()
+    thread.join(timeout)
+
+    if thread.is_alive():
+        print(f"OpenAI request exceeded {timeout} seconds and was aborted.")
+        return None
+
+    if "error" in result_container:
+        print(f"OpenAI request failed: {result_container['error']}")
+        return None
+
+    return result_container.get("value")
 
 # If modifying these SCOPES, delete the file token.json.
 SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
@@ -120,8 +182,7 @@ def get_tldr_forecast(weather_data, style="random"):
         "zen_master",
     ]
 
-    if style == "random":
-        style = random.choice(styles)
+    chosen_style = random.choice(styles) if style == "random" else style
 
     style_prompts = {
         "poem": "Turn the weather forecast into a very short whimsical poem. Be concise and short.",
@@ -134,24 +195,56 @@ def get_tldr_forecast(weather_data, style="random"):
 
     {formatted_data}
 
-    {style_prompts.get(style, "Summarize this into a conversational, super short forecast.")}
+    {style_prompts.get(chosen_style, "Summarize this into a conversational, super short forecast.")}
     """
 
-    if client is None:
-        return "Weather summary unavailable.", style
+    cache_key = (
+        json.dumps(weather_data, sort_keys=True),
+        chosen_style,
+    )
 
-    try:
-        completion = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "user", "content": prompt}
-            ]
-        )
-        summary = completion.choices[0].message.content.strip()
-        return summary, style
-    except Exception as e:
-        print(f"Error generating forecast summary: {e}")
-    return f"Could not generate forecast summary in {style} style.", style
+    now = datetime.now()
+    cache_entry = _forecast_summary_cache
+    if cache_entry["key"] == cache_key and now < cache_entry["expires"]:
+        return cache_entry["value"]
+
+    fallback_message = "Weather summary unavailable."
+    fallback_value = (fallback_message, chosen_style)
+
+    if client is None:
+        _forecast_summary_cache.update({
+            "key": cache_key,
+            "expires": now + AI_CACHE_FAILURE_TTL,
+            "value": fallback_value,
+        })
+        return fallback_value
+
+    completion = _safe_chat_completion(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    if completion and completion.choices:
+        try:
+            summary = completion.choices[0].message.content.strip()
+        except (AttributeError, IndexError):
+            summary = ""
+        if summary:
+            cache_value = (summary, chosen_style)
+            _forecast_summary_cache.update({
+                "key": cache_key,
+                "expires": now + AI_CACHE_SUCCESS_TTL,
+                "value": cache_value,
+            })
+            return cache_value
+
+    print(f"Error generating forecast summary in {chosen_style} style. Using fallback.")
+    _forecast_summary_cache.update({
+        "key": cache_key,
+        "expires": now + AI_CACHE_FAILURE_TTL,
+        "value": fallback_value,
+    })
+    return fallback_value
 
 _window_fullscreen_state = {}
 
