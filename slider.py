@@ -1349,7 +1349,7 @@ def play_video(video_path, temp, weather):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"Could not open video {video_path}")
-        return get_first_frame(video_path)
+        return get_first_frame(video_path), False
 
     fps = cap.get(cv2.CAP_PROP_FPS)
     if fps <= 1:
@@ -1357,6 +1357,8 @@ def play_video(video_path, temp, weather):
     wait = int(1000 / fps)
 
     last_frame = None
+    quit_requested = False
+
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -1365,14 +1367,17 @@ def play_video(video_path, temp, weather):
         last_frame = frame.copy()
         overlay = add_time_overlay(frame, temp, weather)
         show_frame('slideshow', overlay)
-        if cv2.waitKey(wait) == ord('q'):
-            cap.release()
-            show_mouse_cursor()
-            cv2.destroyAllWindows()
-            exit()
+        key = cv2.waitKey(wait)
+        if key == ord('q'):
+            quit_requested = True
+            break
 
     cap.release()
-    return last_frame if last_frame is not None else get_first_frame(video_path)
+
+    if last_frame is None:
+        last_frame = get_first_frame(video_path)
+
+    return last_frame, quit_requested
         
 def load_local_metadata(metadata_file):
     if os.path.exists(metadata_file):
@@ -1640,7 +1645,10 @@ def main():
                     forecast = refreshed
 
             if current_item['type'] == 'video':
-                last_frame = play_video(current_item['data'], temp, weather)
+                last_frame, quit_requested = play_video(current_item['data'], temp, weather)
+                if quit_requested:
+                    close_slideshow()
+                    return
                 if last_frame is not None:
                     current_img = last_frame
             else:
@@ -1660,7 +1668,10 @@ def main():
                         return
 
             if next_item['type'] == 'video':
-                last_frame = play_video(next_item['data'], temp, weather)
+                last_frame, quit_requested = play_video(next_item['data'], temp, weather)
+                if quit_requested:
+                    close_slideshow()
+                    return
                 current_img = last_frame if last_frame is not None else prepare_initial_frame(next_item)
             else:
                 frame_with_overlay = add_time_overlay(next_img, temp, weather)
