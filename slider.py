@@ -8,6 +8,10 @@ import traceback
 import cv2
 import numpy as np
 import math
+import platform
+import ctypes
+from ctypes import c_char_p, c_ulong, c_void_p
+from ctypes.util import find_library
 from datetime import datetime, timedelta
 import requests
 from requests import RequestException
@@ -150,6 +154,120 @@ def get_tldr_forecast(weather_data, style="random"):
     return f"Could not generate forecast summary in {style} style.", style
 
 _window_fullscreen_state = {}
+
+
+_cursor_state = {
+    "hidden": False,
+    "system": platform.system(),
+    "display": None,
+    "window": None,
+    "x11": None,
+    "xfixes": None,
+}
+
+
+def hide_mouse_cursor():
+    """Attempt to hide the system mouse cursor while the slideshow is active."""
+    state = _cursor_state
+    if state["hidden"]:
+        return
+
+    system = state["system"]
+
+    try:
+        if system == "Windows":
+            ctypes.windll.user32.ShowCursor(False)
+            state["hidden"] = True
+        elif system == "Darwin":
+            try:
+                from AppKit import NSCursor  # type: ignore
+            except ImportError:
+                return
+            NSCursor.hide()
+            state["hidden"] = True
+        elif system == "Linux":
+            lib_x11 = find_library("X11")
+            lib_xfixes = find_library("Xfixes")
+            if not lib_x11 or not lib_xfixes:
+                return
+
+            x11 = ctypes.cdll.LoadLibrary(lib_x11)
+            xfixes = ctypes.cdll.LoadLibrary(lib_xfixes)
+
+            x11.XOpenDisplay.argtypes = [c_char_p]
+            x11.XOpenDisplay.restype = c_void_p
+            display = x11.XOpenDisplay(None)
+            if not display:
+                return
+
+            x11.XDefaultRootWindow.argtypes = [c_void_p]
+            x11.XDefaultRootWindow.restype = c_ulong
+            root = x11.XDefaultRootWindow(display)
+
+            xfixes.XFixesHideCursor.argtypes = [c_void_p, c_ulong]
+            xfixes.XFixesHideCursor.restype = None
+            xfixes.XFixesHideCursor(display, root)
+
+            x11.XFlush.argtypes = [c_void_p]
+            x11.XFlush.restype = None
+            x11.XFlush(display)
+
+            state.update({
+                "hidden": True,
+                "display": display,
+                "window": root,
+                "x11": x11,
+                "xfixes": xfixes,
+            })
+    except Exception as exc:
+        print(f"Failed to hide mouse cursor: {exc}")
+
+
+def show_mouse_cursor():
+    """Restore the system mouse cursor after the slideshow ends."""
+    state = _cursor_state
+    if not state["hidden"]:
+        return
+
+    system = state["system"]
+
+    try:
+        if system == "Windows":
+            ctypes.windll.user32.ShowCursor(True)
+        elif system == "Darwin":
+            try:
+                from AppKit import NSCursor  # type: ignore
+            except ImportError:
+                pass
+            else:
+                NSCursor.unhide()
+        elif system == "Linux":
+            display = state.get("display")
+            window = state.get("window")
+            x11 = state.get("x11")
+            xfixes = state.get("xfixes")
+            if display and window is not None and x11 and xfixes:
+                xfixes.XFixesShowCursor.argtypes = [c_void_p, c_ulong]
+                xfixes.XFixesShowCursor.restype = None
+                xfixes.XFixesShowCursor(display, window)
+
+                x11.XFlush.argtypes = [c_void_p]
+                x11.XFlush.restype = None
+                x11.XFlush(display)
+
+                x11.XCloseDisplay.argtypes = [c_void_p]
+                x11.XCloseDisplay.restype = ctypes.c_int
+                x11.XCloseDisplay(display)
+    except Exception as exc:
+        print(f"Failed to restore mouse cursor: {exc}")
+    finally:
+        state.update({
+            "hidden": False,
+            "display": None,
+            "window": None,
+            "x11": None,
+            "xfixes": None,
+        })
 
 
 def ensure_fullscreen(window_name):
@@ -1249,6 +1367,7 @@ def play_video(video_path, temp, weather):
         show_frame('slideshow', overlay)
         if cv2.waitKey(wait) == ord('q'):
             cap.release()
+            show_mouse_cursor()
             cv2.destroyAllWindows()
             exit()
 
@@ -1426,6 +1545,12 @@ def main():
 
     last_refresh_time = datetime.now()
 
+    hide_mouse_cursor()
+
+    def close_slideshow():
+        show_mouse_cursor()
+        cv2.destroyAllWindows()
+
     while True:
         try:
             central_time = datetime.now(ZoneInfo("America/Chicago"))
@@ -1522,7 +1647,7 @@ def main():
                 frame_with_overlay = add_time_overlay(current_img, temp, weather)
                 show_frame('slideshow', frame_with_overlay)
                 if cv2.waitKey(display_time * 1000) == ord('q'):
-                    cv2.destroyAllWindows()
+                    close_slideshow()
                     return
 
             if has_multiple_items and next_index != index:
@@ -1531,7 +1656,7 @@ def main():
                     frame_with_overlay = add_time_overlay(frame, temp, weather)
                     show_frame('slideshow', frame_with_overlay)
                     if cv2.waitKey(1) == ord('q'):
-                        cv2.destroyAllWindows()
+                        close_slideshow()
                         return
 
             if next_item['type'] == 'video':
@@ -1541,7 +1666,7 @@ def main():
                 frame_with_overlay = add_time_overlay(next_img, temp, weather)
                 show_frame('slideshow', frame_with_overlay)
                 if cv2.waitKey(display_time * 1000) == ord('q'):
-                    cv2.destroyAllWindows()
+                    close_slideshow()
                     return
                 current_img = next_img
 
@@ -1560,7 +1685,7 @@ def main():
                 refreshed_media, local_metadata, downloaded_files = refresh_result
                 if not refreshed_media:
                     print("No media found in the folder.")
-                    cv2.destroyAllWindows()
+                    close_slideshow()
                     return
 
                 media_items = refreshed_media
@@ -1590,7 +1715,7 @@ def main():
 
                 play_queue = build_play_queue(media_items, index)
         except KeyboardInterrupt:
-            cv2.destroyAllWindows()
+            close_slideshow()
             return
         except Exception as exc:
             print(f"Unexpected error in slideshow loop: {exc}")
