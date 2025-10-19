@@ -8,10 +8,12 @@ import numpy as np
 import math
 from datetime import datetime, timedelta
 import requests
+from requests import RequestException
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
 from openai import OpenAI
 import textwrap
@@ -48,7 +50,14 @@ display_time = 30
 num_transition_frames = int(transition_time * 30)
 api_key = os.getenv('WEATHERMAP_API_KEY')
 openai_key = os.getenv('OPENAI_API_KEY')
-client = OpenAI(api_key=openai_key)
+
+REQUEST_TIMEOUT = 10  # seconds
+
+try:
+    client = OpenAI(api_key=openai_key) if openai_key else None
+except Exception as exc:
+    print(f"Failed to initialize OpenAI client: {exc}")
+    client = None
 
 # If modifying these SCOPES, delete the file token.json.
 SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
@@ -59,9 +68,17 @@ video_extensions = ('.mp4', '.mov', '.avi', '.mkv', '.webm')
 
 def get_weather_forecast2(api_key, city="Fond du Lac", country_code="US"):
     """Fetches the weather forecast for the day from OpenWeatherMap API."""
+    if not api_key:
+        print("OpenWeatherMap API key is missing.")
+        return []
     url = f"http://api.openweathermap.org/data/2.5/forecast?q={city},{country_code}&units=imperial&appid={api_key}"
-    response = requests.get(url)
-    
+    try:
+        response = requests.get(url, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+    except RequestException as exc:
+        print(f"Error fetching weather data: {exc}")
+        return []
+
     if response.status_code == 200:
         data = response.json()
         today = datetime.now().strftime("%Y-%m-%d")
@@ -113,6 +130,9 @@ def get_tldr_forecast(weather_data, style="random"):
     {style_prompts.get(style, "Summarize this into a conversational, super short forecast.")}
     """
 
+    if client is None:
+        return "Weather summary unavailable.", style
+
     try:
         completion = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -127,8 +147,17 @@ def get_tldr_forecast(weather_data, style="random"):
         return f"Could not generate forecast summary in {style} style.", style
 
 def get_weather_forecast(api_key, city="Fond du Lac", country_code="US"):
+    if not api_key:
+        print("OpenWeatherMap API key is missing.")
+        return None
     url = f"http://api.openweathermap.org/data/2.5/forecast?q={city},{country_code}&units=imperial&appid={api_key}"
-    response = requests.get(url)
+    try:
+        response = requests.get(url, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+    except RequestException as exc:
+        print(f"Error fetching weather forecast data: {exc}")
+        return None
+
     if response.status_code == 200:
         data = response.json()
         daily_forecast = defaultdict(lambda: {'temp_min': float('inf'), 'temp_max': float('-inf'), 'descriptions': []})
@@ -201,6 +230,9 @@ def get_ai_generated_news():
               "summary": "A brief 1-2 sentence summary of the news"
             }
         """
+
+    if client is None:
+        return {"headline": "News unavailable", "summary": "Unable to contact OpenAI."}
 
     try:
         completion = client.chat.completions.create(
@@ -313,20 +345,35 @@ def add_news_overlay(frame, news):
         return frame
 
 def get_weather_data(api_key, cache_file='weather_cache.json'):
+    if not api_key:
+        print("OpenWeatherMap API key is missing.")
+        return None, None
     if os.path.exists(cache_file):
-        with open(cache_file, 'r') as f:
-            data = json.load(f)
-            timestamp = datetime.strptime(data['timestamp'], "%Y-%m-%d %H:%M:%S")
-            if datetime.now() - timestamp < timedelta(minutes=15):
-                return data['temp'], data['weather']
+        try:
+            with open(cache_file, 'r') as f:
+                data = json.load(f)
+                timestamp = datetime.strptime(data['timestamp'], "%Y-%m-%d %H:%M:%S")
+                if datetime.now() - timestamp < timedelta(minutes=15):
+                    return data['temp'], data['weather']
+        except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
+            print(f"Failed to read weather cache: {exc}")
     url = f"http://api.openweathermap.org/data/2.5/weather?q=Waupun,WI,US&units=imperial&appid={api_key}"
-    response = requests.get(url)
+    try:
+        response = requests.get(url, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+    except RequestException as exc:
+        print(f"Error fetching weather data: {exc}")
+        return None, None
+
     if response.status_code == 200:
         data = response.json()
         temp = data['main']['temp']
         weather = data['weather'][0]['main']
-        with open(cache_file, 'w') as f:
-            json.dump({'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'temp': temp, 'weather': weather}, f)
+        try:
+            with open(cache_file, 'w') as f:
+                json.dump({'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'temp': temp, 'weather': weather}, f)
+        except OSError as exc:
+            print(f"Failed to write weather cache: {exc}")
         return temp, weather
     else:
         print("Error fetching weather data")
@@ -335,30 +382,71 @@ def get_weather_data(api_key, cache_file='weather_cache.json'):
 def authenticate_drive():
     creds = None
     if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+        try:
+            creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+        except Exception as exc:
+            print(f"Failed to load existing credentials: {exc}")
+            creds = None
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            try:
+                creds.refresh(Request())
+            except Exception as exc:
+                print(f"Failed to refresh credentials: {exc}")
+                creds = None
         else:
-            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
-    return build('drive', 'v3', credentials=creds)
+            try:
+                flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+                creds = flow.run_local_server(port=0)
+            except Exception as exc:
+                print(f"Failed to authenticate with Google Drive: {exc}")
+                return None
+        try:
+            with open('token.json', 'w') as token:
+                token.write(creds.to_json())
+        except OSError as exc:
+            print(f"Failed to save credentials: {exc}")
+    try:
+        return build('drive', 'v3', credentials=creds)
+    except Exception as exc:
+        print(f"Failed to build Google Drive service: {exc}")
+        return None
 
 def list_files_in_folder(service, folder_id):
+    if service is None:
+        return []
     query = f"'{folder_id}' in parents"
-    results = service.files().list(q=query, pageSize=100, fields="nextPageToken, files(id, name, modifiedTime, size)").execute()
+    try:
+        results = service.files().list(q=query, pageSize=100, fields="nextPageToken, files(id, name, modifiedTime, size)").execute()
+    except HttpError as exc:
+        print(f"Failed to list files: {exc}")
+        return []
+    except Exception as exc:
+        print(f"Unexpected error listing files: {exc}")
+        return []
     items = results.get('files', [])
     return items
 
 def download_file(service, file_id, file_name):
-    request = service.files().get_media(fileId=file_id)
-    fh = io.FileIO(file_name, 'wb')
-    downloader = MediaIoBaseDownload(fh, request)
-    done = False
-    while done is False:
-        status, done = downloader.next_chunk()
+    if service is None:
+        return False
+    try:
+        request = service.files().get_media(fileId=file_id)
+        fh = io.FileIO(file_name, 'wb')
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while done is False:
+            status, done = downloader.next_chunk()
+    except HttpError as exc:
+        print(f"Failed to download file {file_id}: {exc}")
+        return False
+    except OSError as exc:
+        print(f"Failed to write file {file_name}: {exc}")
+        return False
+    except Exception as exc:
+        print(f"Unexpected error downloading file {file_id}: {exc}")
+        return False
+    return True
 
 def resize_and_pad(image, width, height):
     h, w = image.shape[:2]
@@ -1080,18 +1168,30 @@ def play_video(video_path, temp, weather):
         
 def load_local_metadata(metadata_file):
     if os.path.exists(metadata_file):
-        with open(metadata_file, 'r') as f:
-            return json.load(f)
+        try:
+            with open(metadata_file, 'r') as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"Failed to load metadata: {exc}")
     return {}
 
 def save_local_metadata(metadata_file, metadata):
-    with open(metadata_file, 'w') as f:
-        json.dump(metadata, f)
+    try:
+        with open(metadata_file, 'w') as f:
+            json.dump(metadata, f)
+    except OSError as exc:
+        print(f"Failed to save metadata: {exc}")
 
 def main():
     service = authenticate_drive()
+    if service is None:
+        print("Unable to authenticate with Google Drive.")
+        return
     folder_id = '1hpBzZ_kiXpIBtRv1FN3da8zOhT5J0Ggi'  # Replace with your folder ID
     files = list_files_in_folder(service, folder_id)
+    if not files:
+        print("No files retrieved from Google Drive.")
+        return
     temp_dir = 'images'
     if not os.path.exists(temp_dir):
         os.makedirs(temp_dir)
@@ -1130,7 +1230,9 @@ def main():
                 continue
 
         print(f"Downloading file: {file_name}")
-        download_file(service, file['id'], file_path)
+        if not download_file(service, file['id'], file_path):
+            print(f"Skipping file due to download error: {file_name}")
+            continue
         if ext in image_extensions:
             img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
             if img is not None:
@@ -1146,7 +1248,7 @@ def main():
 
     if not media_items:
         print("No media found in the folder.")
-        exit()
+        return
 
     images_only = [item['data'] for item in media_items if item['type'] == 'image']
 
@@ -1175,6 +1277,8 @@ def main():
     else:
         current_img = get_first_frame(current_item['data'])
     forecast = get_weather_forecast(api_key)
+    if forecast is None:
+        forecast = []
     #news = get_ai_generated_news()
     while True:
         # Get the current hour and day of the week
@@ -1226,10 +1330,11 @@ def main():
 
                 city = "Waupun"
                 country_code = "US"
-                custom_title = ""
+                custom_title = "Today's Forecast"
 
                 weather_data = get_weather_forecast2(api_key, city, country_code)
 
+                forecast_summary = "Weather data unavailable."
                 if weather_data:
                     forecast_summary, style_used = get_tldr_forecast(weather_data)
                     custom_title = style_titles.get(style_used, "Today's Forecast")
@@ -1249,7 +1354,9 @@ def main():
     
         # Refresh the forecast periodically (about once an hour)
         if datetime.now().minute == 0:
-            forecast = get_weather_forecast(api_key)
+            refreshed = get_weather_forecast(api_key)
+            if refreshed is not None:
+                forecast = refreshed
 
         if current_item['type'] == 'video':
             current_img = play_video(current_item['data'], temp, weather)
