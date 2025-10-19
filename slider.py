@@ -25,6 +25,7 @@ from openai import OpenAI
 import textwrap
 import re
 import threading
+import queue
 from collections import defaultdict
 from svglib.svglib import svg2rlg
 from reportlab.graphics import renderPM
@@ -1271,7 +1272,7 @@ def create_single_image_with_background(image, width, height):
 
     return blurred_background
 
-def add_time_overlay(frame, temp, weather):
+def add_time_overlay(frame, temp, weather, status_text=None):
     try:
         frame = normalize_frame_for_display(frame, enforce_size=False)
         if frame is None:
@@ -1311,6 +1312,16 @@ def add_time_overlay(frame, temp, weather):
 
         cv2.putText(overlay_frame, weather_text, (text_x_weather, text_y), font, font_scale, font_color, thickness, cv2.LINE_AA)
         cv2.putText(overlay_frame, time_text, (text_x_time, text_y), font, font_scale, font_color, thickness, cv2.LINE_AA)
+
+        if status_text:
+            status_font_scale = 0.5
+            status_thickness = 1
+            status_position = (10, 30)
+            # Draw a subtle shadow for readability against bright backgrounds.
+            cv2.putText(overlay_frame, status_text, (status_position[0] + 1, status_position[1] + 1), font,
+                        status_font_scale, (0, 0, 0), status_thickness, cv2.LINE_AA)
+            cv2.putText(overlay_frame, status_text, status_position, font, status_font_scale, font_color,
+                        status_thickness, cv2.LINE_AA)
 
         return overlay_frame
     except Exception as e:
@@ -1496,7 +1507,7 @@ def get_first_frame(video_path):
     return frame
 
 
-def play_video(video_path, temp, weather):
+def play_video(video_path, temp, weather, status_text=None):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"Could not open video {video_path}")
@@ -1516,7 +1527,7 @@ def play_video(video_path, temp, weather):
             break
         frame = resize_and_pad(frame, frame_width, frame_height)
         last_frame = frame.copy()
-        overlay = add_time_overlay(frame, temp, weather)
+        overlay = add_time_overlay(frame, temp, weather, status_text=status_text)
         show_frame('slideshow', overlay)
         key = cv2.waitKey(wait)
         if key == ord('q'):
@@ -1691,19 +1702,110 @@ def run_slideshow_once():
     media_items = []
     downloaded_files = set()
 
+    refresh_requests = None
+    refresh_results = None
+    worker_thread = None
+    worker_stop_event = threading.Event()
+    refresh_state_lock = threading.Lock()
+    refresh_state = {"running": False}
+    refresh_request_pending = False
+    last_refresh_time = datetime.now()
+
+    def request_worker_stop():
+        if worker_thread is None:
+            return
+        worker_stop_event.set()
+        if refresh_requests is not None:
+            try:
+                refresh_requests.put_nowait("stop")
+            except queue.Full:
+                refresh_requests.put("stop")
+        worker_thread.join(timeout=5)
+
     if service is None:
         print("Unable to authenticate with Google Drive. Attempting to use cached media.")
         media_items = load_media_from_local_cache(temp_dir)
     else:
-        refresh_result = refresh_media_items(service, folder_id, temp_dir, metadata_file, local_metadata)
-        if refresh_result is None:
-            print("Unable to retrieve media from Google Drive. Attempting to use cached media.")
-            media_items = load_media_from_local_cache(temp_dir)
-        else:
-            media_items, local_metadata, downloaded_files = refresh_result
+        refresh_requests = queue.Queue()
+        refresh_results = queue.Queue()
+
+        def background_refresh_worker():
+            while not worker_stop_event.is_set():
+                try:
+                    payload = refresh_requests.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+
+                if payload == "stop":
+                    break
+
+                if not isinstance(payload, dict) or payload.get("type") != "refresh":
+                    continue
+
+                metadata_snapshot = payload.get("metadata") or {}
+
+                with refresh_state_lock:
+                    refresh_state["running"] = True
+
+                try:
+                    result = refresh_media_items(
+                        service,
+                        folder_id,
+                        temp_dir,
+                        metadata_file,
+                        metadata_snapshot,
+                    )
+                except Exception as exc:
+                    print(f"Background refresh failed: {exc}")
+                    traceback.print_exc()
+                    result = None
+
+                if result is None:
+                    refresh_results.put(("error", None))
+                else:
+                    refresh_results.put(("success", result))
+
+                with refresh_state_lock:
+                    refresh_state["running"] = False
+
+            with refresh_state_lock:
+                refresh_state["running"] = False
+
+        worker_thread = threading.Thread(target=background_refresh_worker, daemon=True)
+        worker_thread.start()
+
+        refresh_requests.put({"type": "refresh", "metadata": dict(local_metadata)})
+        refresh_request_pending = True
+
+        while True:
+            try:
+                status, result = refresh_results.get(timeout=0.5)
+            except queue.Empty:
+                if worker_stop_event.is_set():
+                    break
+                continue
+
+            refresh_request_pending = False
+            last_refresh_time = datetime.now()
+
+            if status == "success" and result is not None:
+                refreshed_media, new_metadata, new_downloaded_files = result
+                local_metadata = new_metadata
+                downloaded_files = new_downloaded_files
+                if refreshed_media:
+                    media_items = refreshed_media
+                else:
+                    print("No media found in the folder. Continuing with existing playlist.")
+                    media_items = load_media_from_local_cache(temp_dir)
+            else:
+                print("Unable to retrieve media from Google Drive. Attempting to use cached media.")
+                media_items = load_media_from_local_cache(temp_dir)
+
+            break
 
     if not media_items:
         print("No media available to display. Will retry shortly.")
+        request_worker_stop()
         return False
 
     images_only = [item['data'] for item in media_items if item['type'] == 'image']
@@ -1738,6 +1840,7 @@ def run_slideshow_once():
         current_img = prepare_initial_frame(current_item)
         if current_img is None:
             print("Failed to prepare the initial media item.")
+            request_worker_stop()
             return False
 
         play_queue = build_play_queue(media_items, index)
@@ -1752,10 +1855,69 @@ def run_slideshow_once():
         if forecast is None:
             forecast = []
 
-        last_refresh_time = datetime.now()
-
         while True:
             try:
+                if can_refresh and refresh_results is not None:
+                    try:
+                        while True:
+                            status, result = refresh_results.get_nowait()
+                            refresh_request_pending = False
+                            last_refresh_time = datetime.now()
+
+                            if status == "success" and result is not None:
+                                refreshed_media, new_metadata, new_downloaded_files = result
+                                if not refreshed_media:
+                                    print("No media found in the folder. Continuing with existing playlist.")
+                                    continue
+
+                                local_metadata = new_metadata
+                                downloaded_files = new_downloaded_files
+                                media_items = refreshed_media
+                                images_only = [item['data'] for item in media_items if item['type'] == 'image']
+
+                                current_name = current_item.get('name') if current_item else None
+                                prioritize_new = bool(new_downloaded_files)
+                                available_names = {item['name'] for item in media_items}
+
+                                if current_name is None or prioritize_new or current_name not in available_names:
+                                    index = 0
+                                    current_item = media_items[index]
+                                    refreshed_frame = prepare_initial_frame(current_item)
+                                    if refreshed_frame is not None:
+                                        current_img = refreshed_frame
+                                else:
+                                    index = next((i for i, item in enumerate(media_items) if item['name'] == current_name), 0)
+                                    current_item = media_items[index]
+                                    if current_item['type'] == 'video':
+                                        refreshed_frame = get_first_frame(current_item['data'])
+                                        if refreshed_frame is not None:
+                                            current_img = refreshed_frame
+                                    elif current_item['name'] in new_downloaded_files:
+                                        refreshed_frame = prepare_initial_frame(current_item)
+                                        if refreshed_frame is not None:
+                                            current_img = refreshed_frame
+
+                                play_queue = build_play_queue(media_items, index)
+                                skip_current_video_playback = False
+                            else:
+                                print("Background refresh failed. Keeping existing playlist.")
+                    except queue.Empty:
+                        pass
+
+                with refresh_state_lock:
+                    running_refresh = refresh_state["running"] if can_refresh else False
+
+                now = datetime.now()
+                if can_refresh and refresh_requests is not None:
+                    if (not refresh_request_pending and not running_refresh and
+                            now - last_refresh_time >= MEDIA_REFRESH_INTERVAL):
+                        refresh_requests.put({"type": "refresh", "metadata": dict(local_metadata)})
+                        refresh_request_pending = True
+
+                status_text = None
+                if can_refresh and (running_refresh or refresh_request_pending):
+                    status_text = "Updating playlist..."
+
                 central_time = datetime.now(ZoneInfo("America/Chicago"))
                 current_hour = central_time.hour
                 current_day = central_time.weekday()
@@ -1850,14 +2012,16 @@ def run_slideshow_once():
                         # when appropriate.
                         skip_current_video_playback = False
                     else:
-                        last_frame, quit_requested = play_video(current_item['data'], temp, weather)
+                        last_frame, quit_requested = play_video(
+                            current_item['data'], temp, weather, status_text=status_text
+                        )
                         if quit_requested:
                             exit_requested = True
                             break
                         if last_frame is not None:
                             current_img = last_frame
                 else:
-                    frame_with_overlay = add_time_overlay(current_img, temp, weather)
+                    frame_with_overlay = add_time_overlay(current_img, temp, weather, status_text=status_text)
                     show_frame('slideshow', frame_with_overlay)
                     if cv2.waitKey(display_time * 1000) == ord('q'):
                         exit_requested = True
@@ -1869,7 +2033,7 @@ def run_slideshow_once():
                 if has_multiple_items and next_index != index:
                     transition = random.choice(transitions)
                     for frame in transition(current_img, next_img, num_transition_frames):
-                        frame_with_overlay = add_time_overlay(frame, temp, weather)
+                        frame_with_overlay = add_time_overlay(frame, temp, weather, status_text=status_text)
                         show_frame('slideshow', frame_with_overlay)
                         if cv2.waitKey(1) == ord('q'):
                             exit_requested = True
@@ -1888,7 +2052,9 @@ def run_slideshow_once():
                         should_play_next_video = False
 
                     if should_play_next_video:
-                        last_frame, quit_requested = play_video(next_item['data'], temp, weather)
+                        last_frame, quit_requested = play_video(
+                            next_item['data'], temp, weather, status_text=status_text
+                        )
                         if quit_requested:
                             exit_requested = True
                             break
@@ -1906,7 +2072,7 @@ def run_slideshow_once():
                         skip_current_video_playback = False
                 else:
                     skip_current_video_playback = False
-                    frame_with_overlay = add_time_overlay(next_img, temp, weather)
+                    frame_with_overlay = add_time_overlay(next_img, temp, weather, status_text=status_text)
                     show_frame('slideshow', frame_with_overlay)
                     if cv2.waitKey(display_time * 1000) == ord('q'):
                         exit_requested = True
@@ -1922,45 +2088,6 @@ def run_slideshow_once():
                 if has_multiple_items:
                     play_queue = [idx for idx in play_queue if idx != index and idx < len(media_items)]
 
-                if datetime.now() - last_refresh_time >= MEDIA_REFRESH_INTERVAL:
-                    last_refresh_time = datetime.now()
-                    if not can_refresh:
-                        continue
-                    refresh_result = refresh_media_items(service, folder_id, temp_dir, metadata_file, local_metadata)
-                    if refresh_result is None:
-                        continue
-
-                    refreshed_media, local_metadata, downloaded_files = refresh_result
-                    if not refreshed_media:
-                        print("No media found in the folder. Continuing with existing playlist.")
-                        continue
-
-                    media_items = refreshed_media
-                    images_only = [item['data'] for item in media_items if item['type'] == 'image']
-
-                    current_name = current_item.get('name')
-                    prioritize_new = bool(downloaded_files)
-                    available_names = {item['name'] for item in media_items}
-
-                    if prioritize_new or current_name not in available_names:
-                        index = 0
-                        current_item = media_items[index]
-                        refreshed_frame = prepare_initial_frame(current_item)
-                        if refreshed_frame is not None:
-                            current_img = refreshed_frame
-                    else:
-                        index = next((i for i, item in enumerate(media_items) if item['name'] == current_name), 0)
-                        current_item = media_items[index]
-                        if current_item['type'] == 'video':
-                            refreshed_frame = get_first_frame(current_item['data'])
-                            if refreshed_frame is not None:
-                                current_img = refreshed_frame
-                        elif current_item['name'] in downloaded_files:
-                            refreshed_frame = prepare_initial_frame(current_item)
-                            if refreshed_frame is not None:
-                                current_img = refreshed_frame
-
-                    play_queue = build_play_queue(media_items, index)
             except KeyboardInterrupt:
                 exit_requested = True
                 break
@@ -1978,6 +2105,7 @@ def run_slideshow_once():
                 ensure_fullscreen('slideshow')
                 continue
     finally:
+        request_worker_stop()
         show_mouse_cursor()
         cv2.destroyAllWindows()
 
