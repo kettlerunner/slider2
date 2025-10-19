@@ -63,6 +63,7 @@ REQUEST_TIMEOUT = 10  # seconds
 MEDIA_REFRESH_INTERVAL = timedelta(minutes=2)
 AI_CACHE_SUCCESS_TTL = timedelta(minutes=30)
 AI_CACHE_FAILURE_TTL = timedelta(minutes=5)
+FORECAST_CACHE_TTL = timedelta(minutes=15)
 NEWS_CACHE_SUCCESS_TTL = timedelta(minutes=15)
 NEWS_CACHE_FAILURE_TTL = timedelta(minutes=3)
 
@@ -72,11 +73,13 @@ except Exception as exc:
     print(f"Failed to initialize OpenAI client: {exc}")
     client = None
 
-_forecast_summary_cache = {
+_forecast_summary_state = {
     "key": None,
     "expires": datetime.min,
     "value": ("Weather summary unavailable.", "random"),
+    "pending": False,
 }
+_forecast_summary_lock = threading.Lock()
 
 _news_cache = {
     "expires": datetime.min,
@@ -146,24 +149,38 @@ SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 image_extensions = ('.png', '.jpg', '.jpeg', '.bmp', '.gif')
 video_extensions = ('.mp4', '.mov', '.avi', '.mkv', '.webm')
 
-def get_weather_forecast2(api_key, city="Fond du Lac", country_code="US"):
+def get_weather_forecast2(api_key, city="Fond du Lac", country_code="US", cache_file='forecast_cache.json'):
     """Fetches the weather forecast for the day from OpenWeatherMap API."""
     if not api_key:
         print("OpenWeatherMap API key is missing.")
         return []
+
+    cached_forecast = None
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, 'r') as cache_handle:
+                cache_payload = json.load(cache_handle)
+            timestamp = datetime.strptime(cache_payload['timestamp'], "%Y-%m-%d %H:%M:%S")
+            cached_forecast = cache_payload.get('forecast', [])
+            if datetime.now() - timestamp < FORECAST_CACHE_TTL:
+                return cached_forecast
+        except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
+            print(f"Failed to read forecast cache: {exc}")
+            cached_forecast = None
+
     url = f"http://api.openweathermap.org/data/2.5/forecast?q={city},{country_code}&units=imperial&appid={api_key}"
     try:
         response = requests.get(url, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
     except RequestException as exc:
         print(f"Error fetching weather data: {exc}")
-        return []
+        return cached_forecast or []
 
     if response.status_code == 200:
         data = response.json()
         today = datetime.now().strftime("%Y-%m-%d")
         today_weather = []
-        
+
         for item in data['list']:
             dt = datetime.fromtimestamp(item['dt'])
             if dt.strftime("%Y-%m-%d") == today:
@@ -174,12 +191,26 @@ def get_weather_forecast2(api_key, city="Fond du Lac", country_code="US"):
                     "wind_speed": item['wind']['speed'],
                     "humidity": item['main']['humidity']
                 })
+
+        try:
+            with open(cache_file, 'w') as cache_handle:
+                json.dump({
+                    'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    'forecast': today_weather,
+                }, cache_handle)
+        except OSError as exc:
+            print(f"Failed to write forecast cache: {exc}")
+
         return today_weather
-    else:
-        print("Error fetching weather data.")
-        return []
+
+    print("Error fetching weather data.")
+    return cached_forecast or []
 
 def get_tldr_forecast(weather_data, style="random"):
+    """Generate a concise forecast summary using OpenAI."""
+    if not weather_data:
+        return "Weather summary unavailable.", style, False
+
     # Format the weather data into a natural language description
     formatted_data = "\n".join(
         f"Time: {item['time']}, Temp: {item['temp']}°F, Description: {item['description']}, "
@@ -209,26 +240,10 @@ def get_tldr_forecast(weather_data, style="random"):
     {style_prompts.get(chosen_style, "Summarize this into a conversational, super short forecast.")}
     """
 
-    cache_key = (
-        json.dumps(weather_data, sort_keys=True),
-        chosen_style,
-    )
-
-    now = datetime.now()
-    cache_entry = _forecast_summary_cache
-    if cache_entry["key"] == cache_key and now < cache_entry["expires"]:
-        return cache_entry["value"]
-
     fallback_message = "Weather summary unavailable."
-    fallback_value = (fallback_message, chosen_style)
 
     if client is None:
-        _forecast_summary_cache.update({
-            "key": cache_key,
-            "expires": now + AI_CACHE_FAILURE_TTL,
-            "value": fallback_value,
-        })
-        return fallback_value
+        return fallback_message, chosen_style, False
 
     completion = _safe_chat_completion(
         model="gpt-4o-mini",
@@ -241,21 +256,10 @@ def get_tldr_forecast(weather_data, style="random"):
         except (AttributeError, IndexError):
             summary = ""
         if summary:
-            cache_value = (summary, chosen_style)
-            _forecast_summary_cache.update({
-                "key": cache_key,
-                "expires": now + AI_CACHE_SUCCESS_TTL,
-                "value": cache_value,
-            })
-            return cache_value
+            return sanitize_text(summary), chosen_style, True
 
     print(f"Error generating forecast summary in {chosen_style} style. Using fallback.")
-    _forecast_summary_cache.update({
-        "key": cache_key,
-        "expires": now + AI_CACHE_FAILURE_TTL,
-        "value": fallback_value,
-    })
-    return fallback_value
+    return fallback_message, chosen_style, False
 
 _window_fullscreen_state = {}
 
@@ -1711,16 +1715,26 @@ def run_slideshow_once():
     refresh_request_pending = False
     last_refresh_time = datetime.now()
 
+    forecast_summary_requests = None
+    forecast_summary_thread = None
+
     def request_worker_stop():
-        if worker_thread is None:
+        if worker_thread is None and forecast_summary_thread is None:
             return
         worker_stop_event.set()
-        if refresh_requests is not None:
+        if refresh_requests is not None and worker_thread is not None:
             try:
                 refresh_requests.put_nowait("stop")
             except queue.Full:
                 refresh_requests.put("stop")
-        worker_thread.join(timeout=5)
+        if worker_thread is not None:
+            worker_thread.join(timeout=5)
+        if forecast_summary_thread is not None and forecast_summary_requests is not None:
+            try:
+                forecast_summary_requests.put_nowait("stop")
+            except queue.Full:
+                forecast_summary_requests.put("stop")
+            forecast_summary_thread.join(timeout=5)
 
     if service is None:
         print("Unable to authenticate with Google Drive. Attempting to use cached media.")
@@ -1809,6 +1823,49 @@ def run_slideshow_once():
         return False
 
     images_only = [item['data'] for item in media_items if item['type'] == 'image']
+
+    if client is not None:
+        forecast_summary_requests = queue.Queue()
+
+        def forecast_summary_worker():
+            while not worker_stop_event.is_set():
+                try:
+                    payload = forecast_summary_requests.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+
+                if payload == "stop":
+                    break
+
+                if not isinstance(payload, dict):
+                    continue
+
+                weather_data = payload.get("weather_data") or []
+                style = payload.get("style", "random")
+                cache_key = payload.get("cache_key")
+
+                try:
+                    summary, style_used, success = get_tldr_forecast(weather_data, style=style)
+                except Exception as exc:
+                    print(f"Error generating TLDR forecast: {exc}")
+                    traceback.print_exc()
+                    summary, style_used, success = "Weather summary unavailable.", style, False
+
+                ttl = AI_CACHE_SUCCESS_TTL if success else AI_CACHE_FAILURE_TTL
+
+                with _forecast_summary_lock:
+                    _forecast_summary_state.update({
+                        "key": cache_key,
+                        "value": (summary, style_used),
+                        "expires": datetime.now() + ttl,
+                        "pending": False,
+                    })
+
+            with _forecast_summary_lock:
+                _forecast_summary_state["pending"] = False
+
+        forecast_summary_thread = threading.Thread(target=forecast_summary_worker, daemon=True)
+        forecast_summary_thread.start()
 
     style_titles = {
         "poem": "Today's Forecast in Verse",
@@ -1979,10 +2036,52 @@ def run_slideshow_once():
 
                         weather_data = get_weather_forecast2(api_key, city, country_code)
 
-                        forecast_summary = "Weather data unavailable."
+                        forecast_summary = "Weather summary unavailable."
                         if weather_data:
-                            forecast_summary, style_used = get_tldr_forecast(weather_data)
-                            custom_title = style_titles.get(style_used, "Today's Forecast")
+                            cache_key = (
+                                json.dumps(weather_data, sort_keys=True),
+                                "random",
+                            )
+                            now = datetime.now()
+                            with _forecast_summary_lock:
+                                cache_key_match = _forecast_summary_state["key"] == cache_key
+                                cache_expires = _forecast_summary_state["expires"]
+                                cache_value = _forecast_summary_state["value"]
+                                cache_pending = _forecast_summary_state.get("pending", False)
+
+                            cache_valid = cache_key_match and now < cache_expires and not cache_pending
+
+                            if cache_valid:
+                                forecast_summary, style_used = cache_value
+                                custom_title = style_titles.get(style_used, "Today's Forecast")
+                            else:
+                                if forecast_summary_requests is not None:
+                                    forecast_summary = "Generating fresh weather summary..."
+                                    should_enqueue = False
+                                    with _forecast_summary_lock:
+                                        current_key = _forecast_summary_state.get("key")
+                                        pending = _forecast_summary_state.get("pending", False)
+                                        if current_key != cache_key or not pending:
+                                            _forecast_summary_state["pending"] = True
+                                            _forecast_summary_state["key"] = cache_key
+                                            if current_key != cache_key:
+                                                _forecast_summary_state["expires"] = datetime.min
+                                            should_enqueue = True
+                                    if should_enqueue:
+                                        try:
+                                            forecast_summary_requests.put_nowait({
+                                                "weather_data": weather_data,
+                                                "style": "random",
+                                                "cache_key": cache_key,
+                                            })
+                                        except queue.Full:
+                                            forecast_summary_requests.put({
+                                                "weather_data": weather_data,
+                                                "style": "random",
+                                                "cache_key": cache_key,
+                                            })
+                                else:
+                                    forecast_summary = "Weather summary unavailable."
                         else:
                             print("No weather data available.")
 
