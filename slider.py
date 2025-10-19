@@ -59,6 +59,34 @@ num_transition_frames = int(transition_time * 30)
 api_key = os.getenv('WEATHERMAP_API_KEY')
 openai_key = os.getenv('OPENAI_API_KEY')
 
+
+def _detect_low_power_device():
+    """Return ``True`` when running on resource constrained hardware."""
+
+    forced = os.getenv("SLIDER_FORCE_LOW_POWER", "").lower()
+    if forced in {"1", "true", "yes", "on"}:
+        return True
+    if forced in {"0", "false", "no", "off"}:
+        return False
+
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+
+    if system == "linux" and machine:
+        arm_like = (
+            machine.startswith("arm"),
+            machine.startswith("aarch64"),
+            machine in {"arm64", "armv7l", "armv6l"},
+        )
+        if any(arm_like):
+            return True
+
+    return False
+
+
+LOW_POWER_MODE = _detect_low_power_device()
+_LOW_POWER_NOTICE_SHOWN = False
+
 REQUEST_TIMEOUT = 10  # seconds
 MEDIA_REFRESH_INTERVAL = timedelta(minutes=2)
 AI_CACHE_SUCCESS_TTL = timedelta(minutes=30)
@@ -1873,17 +1901,28 @@ def run_slideshow_once():
         "zen_master": "Today's Zencast"
     }
 
-    transitions = [
+    basic_transitions = [
         fade_transition,
         slide_transition_left,
         slide_transition_right,
         wipe_transition_top,
         wipe_transition_bottom,
+    ]
+    advanced_transitions = [
         melt_transition,
         wave_transition,
         zen_ripple_transition,
-        dynamic_petal_bloom_transition
+        dynamic_petal_bloom_transition,
     ]
+
+    transitions = list(basic_transitions)
+    if LOW_POWER_MODE:
+        global _LOW_POWER_NOTICE_SHOWN
+        if not _LOW_POWER_NOTICE_SHOWN:
+            print("Low-power mode enabled: using simplified transitions.")
+            _LOW_POWER_NOTICE_SHOWN = True
+    else:
+        transitions.extend(advanced_transitions)
 
     exit_requested = False
 
