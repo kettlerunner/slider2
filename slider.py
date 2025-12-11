@@ -1443,37 +1443,66 @@ def stitch_images(images, width, height):
 
 
 def create_single_image_with_background(image, width, height):
-    """Create a blurred background and place the image centered over it."""
+    """
+    Create a zoomed, blurred background from the image and place
+    a slightly smaller version of the image in the center.
+
+    This ensures that any letterbox/pillarbox area is blurred image,
+    not solid black bars.
+    """
+    if image is None:
+        return np.zeros((height, width, 3), dtype=np.uint8)
+
+    # Use a BGR version to build the background
     if image.ndim == 3 and image.shape[2] == 4:
-        bg_image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+        bg_base = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+    elif image.ndim == 2:
+        bg_base = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
     else:
-        bg_image = image.copy()
+        bg_base = image.copy()
 
-    blurred_background = create_zoomed_blurred_background(bg_image, width, height)
-    resized = resize_and_pad(image, width, height)
-    if resized is None:
-        return blurred_background
+    # Full-screen blurred background
+    background = create_zoomed_blurred_background(bg_base, width, height)
 
-    top_pad = (height - resized.shape[0]) // 2
-    left_pad = (width - resized.shape[1]) // 2
+    # Prepare the foreground image (keep alpha if present)
+    img = image
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    elif img.ndim == 3 and img.shape[2] > 4:
+        img = img[:, :, :4]
 
+    h, w = img.shape[:2]
+    if h == 0 or w == 0:
+        return background
+
+    # Scale image so it fits inside the screen with a margin
+    # (e.g. 90% of the screen in each dimension)
+    margin_factor = 0.9
+    scale = min((width * margin_factor) / float(w),
+                (height * margin_factor) / float(h))
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
+
+    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+    top = (height - new_h) // 2
+    left = (width - new_w) // 2
+
+    # Blend or paste the resized image onto the blurred background
     if resized.ndim == 3 and resized.shape[2] == 4:
+        # BGRA: use alpha blending
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGRA2BGR)
-        alpha = resized[:, :, 3] / 255.0
-        alpha = np.repeat(alpha[:, :, np.newaxis], 3, axis=2)
-        background = blurred_background[
-            top_pad : top_pad + resized.shape[0], left_pad : left_pad + resized.shape[1]
-        ]
-        combined = (1 - alpha) * background + alpha * rgb
-        blurred_background[
-            top_pad : top_pad + resized.shape[0], left_pad : left_pad + resized.shape[1]
-        ] = combined
-    else:
-        blurred_background[
-            top_pad : top_pad + resized.shape[0], left_pad : left_pad + resized.shape[1]
-        ] = resized
+        alpha = resized[:, :, 3].astype(np.float32) / 255.0
+        alpha = alpha[:, :, np.newaxis]
 
-    return blurred_background.astype(np.uint8)
+        roi = background[top:top + new_h, left:left + new_w].astype(np.float32)
+        blended = roi * (1.0 - alpha) + rgb.astype(np.float32) * alpha
+        background[top:top + new_h, left:left + new_w] = blended.astype(np.uint8)
+    else:
+        # No alpha: direct copy
+        background[top:top + new_h, left:left + new_w] = resized
+
+    return background.astype(np.uint8)
 
 
 def add_forecast_overlay(frame, forecast):
@@ -2465,4 +2494,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
