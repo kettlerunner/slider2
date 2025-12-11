@@ -797,7 +797,7 @@ _news_cache = {
 def get_ai_generated_news():
     """Retrieve a short AI-generated news blurb with aggressive timeouts."""
     prompt = """
-Search for current technology, international, business, or economic news from the last week.
+Search for current (in the past week only) technology, international, business, or economic news from the last week.
 Respond with a compelling title and summary of a single story.
 
 Return JSON ONLY:
@@ -828,7 +828,7 @@ Return JSON ONLY:
         return fallback_value
 
     completion = _safe_chat_completion(
-        model="gpt-4o-mini",
+        model="gpt-5-nano",
         messages=[{"role": "user", "content": prompt}],
     )
 
@@ -980,7 +980,7 @@ Here is the weather forecast for today:
         return fallback_message, chosen_style, False
 
     completion = _safe_chat_completion(
-        model="gpt-4o-mini",
+        model="gpt--5-nano",
         messages=[{"role": "user", "content": prompt}],
     )
 
@@ -2556,6 +2556,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
