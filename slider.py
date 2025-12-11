@@ -113,7 +113,8 @@ def _detect_low_power_device() -> bool:
     return False
 
 
-LOW_POWER_MODE = _detect_low_power_device()
+#LOW_POWER_MODE = _detect_low_power_device()
+LOW_POWER_MODE = False
 _LOW_POWER_NOTICE_SHOWN = False
 
 REQUEST_TIMEOUT = 10  # seconds
@@ -1399,47 +1400,96 @@ def dynamic_petal_bloom_transition(current_img, next_img, num_frames):
 
 
 def stitch_images(images, width, height):
-    """Create a grid of images over a blurred background."""
-    num_images = len(images)
-    if num_images == 0:
+    """
+    Build a multi-photo collage on top of a zoomed, blurred background.
+
+    - Uses one of the images as the blur source for the full-screen background.
+    - Tiles up to len(images) photos in a grid.
+    - Each tile is scaled with a margin so you see blur between/around them.
+    - Handles 3-channel (BGR) and 4-channel (BGRA) images.
+    """
+    if not images:
         return np.zeros((height, width, 3), dtype=np.uint8)
 
-    stitched_image = np.ones((height, width, 3), dtype=np.uint8) * 255
-    background_image = random.choice(images)
+    # --- 1) Build blurred background from a random image ---
+    bg_src = random.choice(images)
+    if bg_src is None or bg_src.size == 0:
+        return np.zeros((height, width, 3), dtype=np.uint8)
 
-    if background_image.ndim == 3 and background_image.shape[2] == 4:
-        bg = cv2.cvtColor(background_image, cv2.COLOR_BGRA2BGR)
+    if bg_src.ndim == 2:
+        bg_base = cv2.cvtColor(bg_src, cv2.COLOR_GRAY2BGR)
+    elif bg_src.ndim == 3 and bg_src.shape[2] == 4:
+        bg_base = cv2.cvtColor(bg_src, cv2.COLOR_BGRA2BGR)
     else:
-        bg = background_image.copy()
-    blurred_background = create_blurred_background(bg, width, height)
+        bg_base = bg_src.copy()
 
-    cv2.addWeighted(stitched_image, 0.5, blurred_background, 0.5, 0, stitched_image)
+    background = create_zoomed_blurred_background(bg_base, width, height)
 
-    rows = cols = int(np.ceil(np.sqrt(num_images)))
-    grid_width = width // cols
-    grid_height = height // rows
+    # --- 2) Compute a grid layout (rows x cols) ---
+    n = len(images)
+    cols = int(math.ceil(math.sqrt(n)))
+    rows = int(math.ceil(float(n) / cols))
 
-    for i, img in enumerate(images):
-        resized = resize_and_pad(img, grid_width, grid_height)
-        if resized is None:
+    cell_w = width // cols
+    cell_h = height // rows
+    margin_factor = 0.9  # leave some blurred space around each tile
+
+    # --- 3) Place each image into its cell with alpha-aware blending ---
+    for idx, img in enumerate(images):
+        if img is None or img.size == 0:
             continue
 
-        row = i // cols
-        col = i % cols
-        start_x = col * grid_width
-        start_y = row * grid_height
+        # Normalize to BGR or BGRA
+        if img.ndim == 2:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        elif img.ndim == 3 and img.shape[2] > 4:
+            img = img[:, :, :4]
 
+        h, w = img.shape[:2]
+        if h == 0 or w == 0:
+            continue
+
+        # Scale to fit inside cell with margin
+        scale = min((cell_w * margin_factor) / float(w),
+                    (cell_h * margin_factor) / float(h))
+        new_w = max(1, int(w * scale))
+        new_h = max(1, int(h * scale))
+
+        resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        # Compute cell position
+        row = idx // cols
+        col = idx % cols
+        cell_x = col * cell_w
+        cell_y = row * cell_h
+
+        # Center the resized image inside its cell
+        left = cell_x + (cell_w - new_w) // 2
+        top = cell_y + (cell_h - new_h) // 2
+
+        if left < 0 or top < 0 or left + new_w > width or top + new_h > height:
+            # Safety clip if rounding goes weird
+            left = max(0, left)
+            top = max(0, top)
+            new_w = min(new_w, width - left)
+            new_h = min(new_h, height - top)
+            resized = resized[:new_h, :new_w]
+
+        roi = background[top:top + new_h, left:left + new_w]
+
+        # Blend with alpha if present
         if resized.ndim == 3 and resized.shape[2] == 4:
-            rgb = cv2.cvtColor(resized, cv2.COLOR_BGRA2BGR)
-            alpha = resized[:, :, 3] / 255.0
-            alpha = np.repeat(alpha[:, :, np.newaxis], 3, axis=2)
-            base = stitched_image[start_y : start_y + grid_height, start_x : start_x + grid_width]
-            blended = (1 - alpha) * base + alpha * rgb
-            stitched_image[start_y : start_y + grid_height, start_x : start_x + grid_width] = blended
-        else:
-            stitched_image[start_y : start_y + grid_height, start_x : start_x + grid_width] = resized
+            rgb = cv2.cvtColor(resized, cv2.COLOR_BGRA2BGR).astype(np.float32)
+            alpha = resized[:, :, 3].astype(np.float32) / 255.0
+            alpha = alpha[:, :, np.newaxis]
 
-    return stitched_image.astype(np.uint8)
+            roi_f = roi.astype(np.float32)
+            blended = roi_f * (1.0 - alpha) + rgb * alpha
+            background[top:top + new_h, left:left + new_w] = blended.astype(np.uint8)
+        else:
+            background[top:top + new_h, left:left + new_w] = resized
+
+    return background.astype(np.uint8)
 
 
 def create_single_image_with_background(image, width, height):
@@ -2506,6 +2556,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
