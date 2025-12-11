@@ -2305,6 +2305,9 @@ def run_slideshow_once():
     last_refresh_time = datetime.now()
     exit_requested = False
 
+    # This holds the already-built frame for the current_item (for images).
+    current_frame = None
+
     def get_next_index(current_idx):
         nonlocal play_queue, media_items
         total = len(media_items)
@@ -2349,6 +2352,7 @@ def run_slideshow_once():
                         index = new_index
                         current_item = media_items[index]
 
+                    current_frame = None  # force rebuild for new current_item
                     play_queue = []
                     print("Media playlist refreshed.")
                 elif refreshed_media == []:
@@ -2380,23 +2384,26 @@ def run_slideshow_once():
                                 f"Video {current_item['name']} could not be decoded; skipping."
                             )
                 else:
-                    frame = build_display_frame(current_item, image_paths, forecast_5day)
-                    if frame is None:
-                        print(
-                            f"Image {current_item['name']} could not be loaded; skipping."
-                        )
-                        if len(media_items) > 1:
-                            media_items.pop(index)
-                            image_paths = [
-                                item["path"] for item in media_items if item["type"] == "image"
-                            ]
-                            index %= len(media_items)
-                            current_item = media_items[index]
-                            continue
-                        else:
-                            print("No valid media left to display.")
-                            return False
-                    current_frame = frame
+                    # For images, build the frame only once per "visit"
+                    if current_frame is None:
+                        frame = build_display_frame(current_item, image_paths, forecast_5day)
+                        if frame is None:
+                            print(
+                                f"Image {current_item['name']} could not be loaded; skipping."
+                            )
+                            if len(media_items) > 1:
+                                media_items.pop(index)
+                                image_paths = [
+                                    item["path"] for item in media_items if item["type"] == "image"
+                                ]
+                                index %= len(media_items)
+                                current_item = media_items[index]
+                                continue
+                            else:
+                                print("No valid media left to display.")
+                                return False
+                        current_frame = frame
+
                     overlay = add_time_overlay(current_frame, temp, weather)
                     show_frame("slideshow", overlay)
                     if cv2.waitKey(display_time * 1000) == ord("q"):
@@ -2435,8 +2442,10 @@ def run_slideshow_once():
                         f"Failed to prepare next frame for {next_item['name']}. Skipping transition."
                     )
                 else:
+                    # Make sure we have a valid starting frame
                     if current_frame is None:
                         current_frame = next_frame
+
                     transition_fn = random.choice(transitions)
                     for frame in transition_fn(current_frame, next_frame, num_transition_frames):
                         overlay = add_time_overlay(frame, temp, weather)
@@ -2446,6 +2455,9 @@ def run_slideshow_once():
                             break
                     if exit_requested:
                         break
+
+                    # The frame we faded into becomes the new "current_frame"
+                    current_frame = next_frame
 
                 current_item = next_item
                 index = next_index
@@ -2494,5 +2506,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
