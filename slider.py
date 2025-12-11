@@ -828,7 +828,7 @@ def get_ai_generated_news():
     try:
         # Responses API + web_search + structured JSON output
         response = client.responses.create(
-            model="gpt-5-nano",  # or "gpt-5.1" if you later want stronger reasoning
+            model="gpt-4o-mini",  # or "gpt-5.1" if you later want stronger reasoning
             tools=[{"type": "web_search"}],
             input=(
                 f"Search the web for real news from the last week (since {one_week_ago}) "
@@ -1026,7 +1026,7 @@ Here is the weather forecast for today:
         return fallback_message, chosen_style, False
 
     completion = _safe_chat_completion(
-        model="gpt--5-nano",
+        model="gpt-5-nano",
         messages=[{"role": "user", "content": prompt}],
     )
 
@@ -2602,6 +2602,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
