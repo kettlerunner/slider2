@@ -795,18 +795,7 @@ _news_cache = {
 
 
 def get_ai_generated_news():
-    """Retrieve a short AI-generated news blurb with aggressive timeouts."""
-    prompt = """
-Search for current (in the past week only) technology, international, business, or economic news from the last week.
-Respond with a compelling title and summary of a single story.
-
-Return JSON ONLY:
-
-{
-  "headline": "The headline goes here",
-  "summary": "A brief 1-2 sentence summary of the news"
-}
-    """.strip()
+    """Retrieve a short AI-generated news blurb using web search + Responses API."""
 
     fallback_value = {
         "headline": "News unavailable",
@@ -815,8 +804,14 @@ Return JSON ONLY:
 
     now = datetime.now()
     cache_entry = _news_cache
-    if now < cache_entry["expires"]:
-        return cache_entry["value"]
+
+    # Preserve existing cache semantics
+    try:
+        if now < cache_entry["expires"]:
+            return cache_entry["value"]
+    except KeyError:
+        # If _news_cache is missing keys, just continue to live request
+        pass
 
     if client is None:
         _news_cache.update(
@@ -827,46 +822,97 @@ Return JSON ONLY:
         )
         return fallback_value
 
-    completion = _safe_chat_completion(
-        model="gpt-5-nano",
-        messages=[{"role": "user", "content": prompt}],
-    )
+    # Build date filter for "last week"
+    one_week_ago = (datetime.utcnow() - timedelta(days=7)).date().isoformat()
 
-    if completion and completion.choices:
+    try:
+        # Responses API + web_search + structured JSON output
+        response = client.responses.create(
+            model="gpt-5-nano",  # or "gpt-5.1" if you later want stronger reasoning
+            tools=[{"type": "web_search"}],
+            input=(
+                f"Search the web for real news from the last week (since {one_week_ago}) "
+                "in technology, international, business, or economic topics. "
+                "Pick exactly ONE credible story and summarize it.\n\n"
+                'Return ONLY a single JSON object with this exact shape:\n'
+                '{\n'
+                '  "headline": "The headline goes here",\n'
+                '  "summary": "A brief 1-2 sentence summary of the news"\n'
+                "}"
+            ),
+            # Structured output: enforce the same JSON schema you already use
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "news_item",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "headline": {"type": "string"},
+                            "summary": {"type": "string"},
+                        },
+                        "required": ["headline", "summary"],
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
+                }
+            },
+        )
+    except Exception as exc:
+        print(f"AI news request failed: {exc}")
+        _news_cache.update(
+            {
+                "expires": now + NEWS_CACHE_FAILURE_TTL,
+                "value": fallback_value,
+            }
+        )
+        return fallback_value
+
+    # Extract the JSON text from the response
+    news_data = ""
+    try:
+        # Newer SDKs expose this convenience property
+        news_data = (response.output_text or "").strip()
+    except AttributeError:
+        # Fallback: manually walk the output items if output_text isn't available
         try:
-            news_data = completion.choices[0].message.content.strip()
-        except (AttributeError, IndexError):
+            for item in getattr(response, "output", []) or []:
+                if getattr(item, "type", None) == "message":
+                    for part in getattr(item, "content", []) or []:
+                        if getattr(part, "type", None) == "output_text":
+                            news_data = (part.text or "").strip()
+                            break
+                    if news_data:
+                        break
+        except Exception as exc:
+            print(f"Failed to extract AI news text: {exc}")
             news_data = ""
 
-        if news_data:
-            if news_data.startswith("```json"):
-                news_data = news_data[len("```json") :].strip()
-            if news_data.endswith("```"):
-                news_data = news_data[: -len("```")].strip()
+    if news_data:
+        try:
+            parsed = json.loads(news_data)
+        except json.JSONDecodeError as exc:
+            print(f"Failed to parse AI news response: {exc}")
+        else:
+            if isinstance(parsed, dict):
+                headline = sanitize_text(str(parsed.get("headline", "")).strip())
+                summary = sanitize_text(str(parsed.get("summary", "")).strip())
 
-            try:
-                parsed = json.loads(news_data)
-            except json.JSONDecodeError as exc:
-                print(f"Failed to parse AI news response: {exc}")
-            else:
-                if isinstance(parsed, dict):
-                    headline = sanitize_text(str(parsed.get("headline", "")).strip())
-                    summary = sanitize_text(str(parsed.get("summary", "")).strip())
-                    if headline and summary:
-                        cache_value = {"headline": headline, "summary": summary}
-                        _news_cache.update(
-                            {
-                                "expires": now + NEWS_CACHE_SUCCESS_TTL,
-                                "value": cache_value,
-                            }
-                        )
-                        return cache_value
-                    else:
-                        print("AI news response missing required text. Using fallback.")
+                if headline and summary:
+                    cache_value = {"headline": headline, "summary": summary}
+                    _news_cache.update(
+                        {
+                            "expires": now + NEWS_CACHE_SUCCESS_TTL,
+                            "value": cache_value,
+                        }
+                    )
+                    return cache_value
                 else:
-                    print("AI news response not a dict. Using fallback.")
+                    print("AI news response missing required text. Using fallback.")
+            else:
+                print("AI news response not a dict. Using fallback.")
     else:
-        print("AI news request failed or returned no choices. Using fallback.")
+        print("AI news request returned empty output_text. Using fallback.")
 
     _news_cache.update(
         {
@@ -2556,6 +2602,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
