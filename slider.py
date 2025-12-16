@@ -2211,7 +2211,7 @@ def get_ambient_brightness():
     global _camera
 
     if _camera is None:
-        _camera = cv2.VideoCapture(0)  # change index if needed (e.g., 1)
+        _camera = cv2.VideoCapture(1)  # change index if needed (e.g., 1)
         if not _camera.isOpened():
             print("Unable to open camera for brightness detection.")
             _camera.release()
@@ -2625,4 +2625,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
