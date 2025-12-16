@@ -89,6 +89,9 @@ num_transition_frames = int(transition_time * 30)
 api_key = os.getenv("WEATHERMAP_API_KEY") or os.getenv("OPENWEATHERMAP_API_KEY")
 openai_key = os.getenv("OPENAI_API_KEY")
 
+# Screen dimming based on ambient brightness (0-255 grayscale)
+BRIGHTNESS_DARK_THRESHOLD = 35.0          # tweak this up/down based on your room
+BRIGHTNESS_CHECK_INTERVAL = timedelta(seconds=15)  # how often to sample the camera
 
 def _detect_low_power_device() -> bool:
     """Return True when running on resource constrained hardware."""
@@ -621,6 +624,21 @@ def show_frame(window_name: str, frame):
         return
     cv2.imshow(window_name, prepared_frame)
     ensure_fullscreen(window_name)
+
+def present_frame(frame, temp, weather, status_text, ambient_dark):
+    """
+    Final step before putting pixels on the screen.
+
+    If ambient_dark is True, we show a black screen instead of the frame
+    (simple "screen off" behavior when the lights are out).
+    Otherwise, we overlay time/weather and show the frame as usual.
+    """
+    if ambient_dark:
+        black = np.zeros((frame_height, frame_width, 3), dtype=np.uint8)
+        show_frame("slideshow", black)
+    else:
+        overlay = add_time_overlay(frame, temp, weather, status_text=status_text)
+        show_frame("slideshow", overlay)
 
 
 # ---------------------------------------------------------------------------
@@ -2094,7 +2112,7 @@ def get_first_frame(video_path):
     return frame
 
 
-def play_video(video_path, temp, weather, status_text=None):
+def play_video(video_path, temp, weather, status_text=None, ambient_dark=False):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"Could not open video {video_path}")
@@ -2116,8 +2134,7 @@ def play_video(video_path, temp, weather, status_text=None):
         if frame is None:
             continue
         last_frame = frame.copy()
-        overlay = add_time_overlay(frame, temp, weather, status_text=status_text)
-        show_frame("slideshow", overlay)
+        present_frame(frame, temp, weather, status_text=status_text, ambient_dark=ambient_dark)
         key = cv2.waitKey(wait)
         if key == ord("q"):
             quit_requested = True
@@ -2179,6 +2196,46 @@ def load_scaled_image(path):
 
     _image_cache[path] = img
     return img
+
+# ---------------------------------------------------------------------------
+# Ambient brightness / camera helpers
+# ---------------------------------------------------------------------------
+
+_camera = None  # global camera handle for brightness sampling
+
+def get_ambient_brightness():
+    """
+    Capture a single frame from the default camera and return its average
+    grayscale brightness (0-255). Returns None on error.
+    """
+    global _camera
+
+    if _camera is None:
+        _camera = cv2.VideoCapture(0)  # change index if needed (e.g., 1)
+        if not _camera.isOpened():
+            print("Unable to open camera for brightness detection.")
+            _camera.release()
+            _camera = None
+            return None
+
+    ret, frame = _camera.read()
+    if not ret or frame is None:
+        print("Failed to capture frame from camera for brightness detection.")
+        return None
+
+    try:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return float(gray.mean())
+    except Exception as exc:
+        print(f"Error computing ambient brightness: {exc}")
+        return None
+
+def release_camera():
+    """Release the ambient brightness camera, if open."""
+    global _camera
+    if _camera is not None:
+        _camera.release()
+        _camera = None
 
 
 # ---------------------------------------------------------------------------
@@ -2354,6 +2411,8 @@ def run_slideshow_once():
     play_queue = []
     last_refresh_time = datetime.now()
     exit_requested = False
+    ambient_dark = False
+    last_brightness_check = datetime.min
 
     # This holds the already-built frame for the current_item (for images).
     current_frame = None
@@ -2376,6 +2435,17 @@ def run_slideshow_once():
 
         while True:
             now = datetime.now()
+
+            # ---------------------------------------------------------------
+            # Ambient brightness / lights-on detection
+            # ---------------------------------------------------------------
+            if now - last_brightness_check >= BRIGHTNESS_CHECK_INTERVAL:
+                b = get_ambient_brightness()
+                last_brightness_check = now
+                if b is not None:
+                    ambient_dark = b < BRIGHTNESS_DARK_THRESHOLD
+                    # Optional debug:
+                    # print(f"Ambient brightness: {b:.1f} -> dark={ambient_dark}")
 
             # Periodic Drive refresh
             if service is not None and now - last_refresh_time >= MEDIA_REFRESH_INTERVAL:
@@ -2422,7 +2492,7 @@ def run_slideshow_once():
             try:
                 if current_item["type"] == "video":
                     current_frame, quit_requested = play_video(
-                        current_item["path"], temp, weather, status_text=None
+                        current_item["path"], temp, weather, status_text=None, ambient_dark=ambient_dark
                     )
                     if quit_requested:
                         exit_requested = True
@@ -2454,8 +2524,7 @@ def run_slideshow_once():
                                 return False
                         current_frame = frame
 
-                    overlay = add_time_overlay(current_frame, temp, weather)
-                    show_frame("slideshow", overlay)
+                    present_frame(current_frame, temp, weather, status_text=None, ambient_dark=ambient_dark)
                     if cv2.waitKey(display_time * 1000) == ord("q"):
                         exit_requested = True
                         break
@@ -2498,8 +2567,7 @@ def run_slideshow_once():
 
                     transition_fn = random.choice(transitions)
                     for frame in transition_fn(current_frame, next_frame, num_transition_frames):
-                        overlay = add_time_overlay(frame, temp, weather)
-                        show_frame("slideshow", overlay)
+                        present_frame(frame, temp, weather, status_text=None, ambient_dark=ambient_dark)
                         if cv2.waitKey(1) == ord("q"):
                             exit_requested = True
                             break
@@ -2516,6 +2584,7 @@ def run_slideshow_once():
                 continue
 
     finally:
+        release_camera()
         show_mouse_cursor()
         cv2.destroyAllWindows()
 
@@ -2556,3 +2625,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
