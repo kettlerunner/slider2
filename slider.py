@@ -637,6 +637,21 @@ def show_frame(window_name: str, frame):
     cv2.imshow(window_name, prepared_frame)
     ensure_fullscreen(window_name)
 
+BUTTON_AUTOHIDE_SECONDS = 5
+
+
+def _update_button_visibility(ui_state):
+    if not ui_state:
+        return
+    if not ui_state.get("show_buttons"):
+        return
+    last_touch = ui_state.get("last_touch")
+    if last_touch is None:
+        return
+    if time.monotonic() - last_touch >= BUTTON_AUTOHIDE_SECONDS:
+        ui_state["show_buttons"] = False
+
+
 def present_frame(frame, temp, weather, status_text=None, ambient_dark=False, ui_state=None):
     """
     Final step before putting pixels on the screen.
@@ -645,12 +660,13 @@ def present_frame(frame, temp, weather, status_text=None, ambient_dark=False, ui
     (simple "screen off" behavior when the lights are out).
     Otherwise, we overlay time/weather and show the frame as usual.
     """
+    _update_button_visibility(ui_state)
     if ambient_dark:
         black = np.zeros((frame_height, frame_width, 3), dtype=np.uint8)
         show_frame("slideshow", black)
     else:
         overlay = add_time_overlay(frame, temp, weather, status_text=status_text)
-        if ui_state and overlay is not None:
+        if ui_state and ui_state.get("show_buttons") and overlay is not None:
             overlay = draw_mode_buttons(overlay, ui_state["buttons"], ui_state["mode"])
         show_frame("slideshow", overlay)
 
@@ -2853,11 +2869,19 @@ def run_slideshow_once():
         "dirty": True,
         "fallback": False,
         "buttons": buttons,
+        "show_buttons": False,
+        "last_touch": None,
     }
 
     def handle_touch(event, x, y, flags, params):
         if event != cv2.EVENT_LBUTTONDOWN:
             return
+        now = time.monotonic()
+        if not mode_state["show_buttons"]:
+            mode_state["show_buttons"] = True
+            mode_state["last_touch"] = now
+            return
+        mode_state["last_touch"] = now
         for button in buttons:
             x1, y1, x2, y2 = button["rect"]
             if x1 <= x <= x2 and y1 <= y <= y2:
