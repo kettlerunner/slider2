@@ -869,48 +869,66 @@ def _safe_responses_create(model: str, prompt: str, timeout: int = REQUEST_TIMEO
         return None
 
     if not hasattr(client, "responses"):
-        return None
-
-    try:
-        return client.responses.create(
-            model=model,
-            input=prompt,
-            tools=[{"type": "web_search_preview"}],
-            timeout=timeout,
-        )
-    except TypeError:
-        pass
-    except Exception as exc:
-        print(f"OpenAI responses request failed: {exc}")
+        print("OpenAI client does not support Responses API. Update the openai package.")
         return None
 
     import threading
 
-    result_container = {}
-
-    def _request():
+    def _attempt_call(args):
         try:
-            result_container["value"] = client.responses.create(
-                model=model,
-                input=prompt,
-                tools=[{"type": "web_search_preview"}],
-            )
+            return client.responses.create(**args, timeout=timeout), None
+        except TypeError:
+            pass
         except Exception as exc:
-            result_container["error"] = exc
+            return None, exc
 
-    thread = threading.Thread(target=_request, daemon=True)
-    thread.start()
-    thread.join(timeout)
+        result_container = {}
 
-    if thread.is_alive():
-        print(f"OpenAI responses request exceeded {timeout} seconds and was aborted.")
-        return None
+        def _request():
+            try:
+                result_container["value"] = client.responses.create(**args)
+            except Exception as exc:
+                result_container["error"] = exc
 
-    if "error" in result_container:
-        print(f"OpenAI responses request failed: {result_container['error']}")
-        return None
+        thread = threading.Thread(target=_request, daemon=True)
+        thread.start()
+        thread.join(timeout)
 
-    return result_container.get("value")
+        if thread.is_alive():
+            print(f"OpenAI responses request exceeded {timeout} seconds and was aborted.")
+            return None, TimeoutError("OpenAI responses request timed out.")
+
+        if "error" in result_container:
+            return None, result_container["error"]
+
+        return result_container.get("value"), None
+
+    attempts = [
+        {"model": model, "input": prompt, "tools": [{"type": "web_search"}]},
+        {"model": model, "input": prompt, "tools": [{"type": "web_search_preview"}]},
+        {
+            "model": model,
+            "input": [{"role": "user", "content": prompt}],
+            "tools": [{"type": "web_search"}],
+        },
+        {
+            "model": model,
+            "input": [{"role": "user", "content": prompt}],
+            "tools": [{"type": "web_search_preview"}],
+        },
+    ]
+
+    last_error = None
+    for args in attempts:
+        response, error = _attempt_call(args)
+        if response is not None:
+            return response
+        if error is not None:
+            last_error = error
+
+    if last_error is not None:
+        print(f"OpenAI responses request failed: {last_error}")
+    return None
 
 
 def _extract_response_text(response):
