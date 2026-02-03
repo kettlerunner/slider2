@@ -39,6 +39,8 @@ OpenWeatherMap API key.
 1. Place your `credentials.json` in the project directory.
 2. Set the following environment variables:
    - `OPENAI_API_KEY` – OpenAI API key for news and forecast summaries.
+   - `OPENAI_CHAT_MODEL` – (Optional) OpenAI model for forecast summaries (default: `gpt-5.2-mini`).
+   - `OPENAI_NEWS_MODEL` – (Optional) OpenAI model for news summaries (default: `gpt-5.2-mini`).
    - `WEATHERMAP_API_KEY` – OpenWeatherMap API key for weather data.
 3. Edit `slider.py` to set your Google Drive `folder_id`.
 4. Run the slideshow:
