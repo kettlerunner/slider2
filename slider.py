@@ -88,6 +88,8 @@ num_transition_frames = int(transition_time * 30)
 # API keys
 api_key = os.getenv("WEATHERMAP_API_KEY") or os.getenv("OPENWEATHERMAP_API_KEY")
 openai_key = os.getenv("OPENAI_API_KEY")
+OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-5.2-mini")
+OPENAI_NEWS_MODEL = os.getenv("OPENAI_NEWS_MODEL", OPENAI_CHAT_MODEL)
 
 # Touch mode controls
 MODE_DEFINITIONS = [
@@ -1126,7 +1128,7 @@ Return JSON ONLY:
         )
         return fallback_value
 
-    response = _safe_responses_create(model="gpt-4o-mini", prompt=prompt)
+    response = _safe_responses_create(model=OPENAI_NEWS_MODEL, prompt=prompt)
     news_data = _extract_response_text(response)
 
     if news_data:
@@ -1273,7 +1275,7 @@ Here is the weather forecast for today:
         return fallback_message, chosen_style, False
 
     completion = _safe_chat_completion(
-        model="gpt-4o-mini",
+        model=OPENAI_CHAT_MODEL,
         messages=[{"role": "user", "content": prompt}],
     )
 
