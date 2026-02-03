@@ -2176,7 +2176,10 @@ def add_time_overlay(frame, temp, weather, status_text=None):
         if status_text:
             status_font_scale = 0.5
             status_thickness = 1
-            status_position = (10, 30)
+            status_size, _ = cv2.getTextSize(
+                status_text, font, status_font_scale, status_thickness
+            )
+            status_position = (frame.shape[1] - status_size[0] - 10, 30)
             cv2.putText(
                 overlay_frame,
                 status_text,
@@ -2871,6 +2874,7 @@ def run_slideshow_once():
         "buttons": buttons,
         "show_buttons": False,
         "last_touch": None,
+        "needs_redraw": False,
     }
 
     def handle_touch(event, x, y, flags, params):
@@ -2880,8 +2884,10 @@ def run_slideshow_once():
         if not mode_state["show_buttons"]:
             mode_state["show_buttons"] = True
             mode_state["last_touch"] = now
+            mode_state["needs_redraw"] = True
             return
         mode_state["last_touch"] = now
+        mode_state["needs_redraw"] = True
         for button in buttons:
             x1, y1, x2, y2 = button["rect"]
             if x1 <= x <= x2 and y1 <= y <= y2:
@@ -3052,6 +3058,16 @@ def run_slideshow_once():
                     )
                     wait_start = time.time()
                     while time.time() - wait_start < display_time:
+                        if mode_state["show_buttons"] or mode_state["needs_redraw"]:
+                            present_frame(
+                                current_frame,
+                                temp,
+                                weather,
+                                status_text=status_text,
+                                ambient_dark=ambient_dark,
+                                ui_state=mode_state,
+                            )
+                            mode_state["needs_redraw"] = False
                         key = cv2.waitKey(100)
                         if key == ord("q"):
                             exit_requested = True
