@@ -11,6 +11,7 @@ Slider2 is a Python-based slideshow application that displays images and videos 
 - Can show random motivational quotes from `quotes.json`
 - Plays local video files in addition to images
 - Fetches data from OpenAI to generate short weather summaries
+- Uses OpenAI web search to retrieve and summarize current news with source diversity and bias labels
 
 ## Requirements
 

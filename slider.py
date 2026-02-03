@@ -128,6 +128,7 @@ AI_CACHE_FAILURE_TTL = timedelta(minutes=5)
 FORECAST_CACHE_TTL = timedelta(minutes=15)
 NEWS_CACHE_SUCCESS_TTL = timedelta(minutes=15)
 NEWS_CACHE_FAILURE_TTL = timedelta(minutes=3)
+NEWS_CACHE_FILE = resource_path("news_cache.json")
 
 
 # ---------------------------------------------------------------------------
@@ -808,27 +809,195 @@ _news_cache = {
     "value": {
         "headline": "News unavailable",
         "summary": "No updates retrieved yet.",
+        "sources": [],
+        "bias": "Center",
+        "bias_note": "",
     },
+    "status": "failure",
 }
+
+
+def _load_news_cache_from_disk():
+    if not os.path.exists(NEWS_CACHE_FILE):
+        return None
+    try:
+        with open(NEWS_CACHE_FILE, "r") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Failed to read news cache: {exc}")
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    timestamp_str = payload.get("timestamp")
+    try:
+        timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return None
+
+    value = payload.get("value")
+    status = payload.get("status", "failure")
+    if not isinstance(value, dict):
+        return None
+
+    return {
+        "timestamp": timestamp,
+        "value": value,
+        "status": status if status in {"success", "failure"} else "failure",
+    }
+
+
+def _save_news_cache_to_disk(value, status):
+    try:
+        with open(NEWS_CACHE_FILE, "w") as handle:
+            json.dump(
+                {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "value": value,
+                    "status": status,
+                },
+                handle,
+            )
+    except OSError as exc:
+        print(f"Failed to write news cache: {exc}")
+
+
+def _safe_responses_create(model: str, prompt: str, timeout: int = REQUEST_TIMEOUT):
+    """Call OpenAI Responses API with optional web search support."""
+    if client is None:
+        return None
+
+    if not hasattr(client, "responses"):
+        return None
+
+    try:
+        return client.responses.create(
+            model=model,
+            input=prompt,
+            tools=[{"type": "web_search_preview"}],
+            timeout=timeout,
+        )
+    except TypeError:
+        pass
+    except Exception as exc:
+        print(f"OpenAI responses request failed: {exc}")
+        return None
+
+    import threading
+
+    result_container = {}
+
+    def _request():
+        try:
+            result_container["value"] = client.responses.create(
+                model=model,
+                input=prompt,
+                tools=[{"type": "web_search_preview"}],
+            )
+        except Exception as exc:
+            result_container["error"] = exc
+
+    thread = threading.Thread(target=_request, daemon=True)
+    thread.start()
+    thread.join(timeout)
+
+    if thread.is_alive():
+        print(f"OpenAI responses request exceeded {timeout} seconds and was aborted.")
+        return None
+
+    if "error" in result_container:
+        print(f"OpenAI responses request failed: {result_container['error']}")
+        return None
+
+    return result_container.get("value")
+
+
+def _extract_response_text(response):
+    if response is None:
+        return ""
+    output_text = getattr(response, "output_text", None)
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
+    output_items = getattr(response, "output", None)
+    if isinstance(output_items, list):
+        chunks = []
+        for item in output_items:
+            for content in getattr(item, "content", []) or []:
+                if getattr(content, "type", None) == "output_text":
+                    text = getattr(content, "text", "")
+                    if text:
+                        chunks.append(text)
+        if chunks:
+            return "\n".join(chunks).strip()
+    return ""
+
+
+def _normalize_news_payload(parsed):
+    if not isinstance(parsed, dict):
+        return None
+
+    headline = sanitize_text(str(parsed.get("headline", "")).strip())
+    summary = sanitize_text(str(parsed.get("summary", "")).strip())
+
+    sources = []
+    raw_sources = parsed.get("sources", [])
+    if isinstance(raw_sources, list):
+        for entry in raw_sources:
+            name = None
+            if isinstance(entry, dict):
+                name = entry.get("name") or entry.get("source") or entry.get("publisher")
+            elif isinstance(entry, str):
+                name = entry
+            if name:
+                cleaned = sanitize_text(str(name).strip())
+                if cleaned:
+                    sources.append(cleaned)
+
+    bias_label = parsed.get("bias_label") or parsed.get("bias") or "center"
+    bias_label = str(bias_label).strip().lower()
+    bias_map = {"left": "Left", "center": "Center", "right": "Right"}
+    bias = bias_map.get(bias_label, "Center")
+    bias_note = sanitize_text(str(parsed.get("bias_note", "")).strip())
+
+    if not headline or not summary:
+        return None
+
+    return {
+        "headline": headline,
+        "summary": summary,
+        "sources": sources,
+        "bias": bias,
+        "bias_note": bias_note,
+    }
 
 
 def get_ai_generated_news():
     """Retrieve a short AI-generated news blurb with aggressive timeouts."""
     prompt = """
-Search for current technology, international, business, or economic news from the last week.
-Respond with a compelling title and summary of a single story.
+Use web search to find a single, current news story from the last 48 hours.
+Gather at least 3 similar articles from different outlets so the summary avoids political bias.
+Summarize neutrally in 1-2 sentences.
 
 Return JSON ONLY:
-
 {
-  "headline": "The headline goes here",
-  "summary": "A brief 1-2 sentence summary of the news"
+  "headline": "A concise headline",
+  "summary": "Neutral 1-2 sentence summary",
+  "sources": [
+    {"name": "Outlet name", "url": "https://example.com/article"}
+  ],
+  "bias_label": "left|center|right",
+  "bias_note": "Short note on why this is the label (e.g., mixed sources)."
 }
     """.strip()
 
     fallback_value = {
         "headline": "News unavailable",
         "summary": "Unable to retrieve the latest update.",
+        "sources": [],
+        "bias": "Center",
+        "bias_note": "",
     }
 
     now = datetime.now()
@@ -836,63 +1005,72 @@ Return JSON ONLY:
     if now < cache_entry["expires"]:
         return cache_entry["value"]
 
+    disk_cache = _load_news_cache_from_disk()
+    if disk_cache:
+        age = now - disk_cache["timestamp"]
+        ttl = NEWS_CACHE_SUCCESS_TTL if disk_cache["status"] == "success" else NEWS_CACHE_FAILURE_TTL
+        if age < ttl:
+            _news_cache.update(
+                {
+                    "expires": now + ttl,
+                    "value": disk_cache["value"],
+                    "status": disk_cache["status"],
+                }
+            )
+            return disk_cache["value"]
+
     if client is None:
         _news_cache.update(
             {
                 "expires": now + NEWS_CACHE_FAILURE_TTL,
                 "value": fallback_value,
+                "status": "failure",
             }
         )
         return fallback_value
 
-    completion = _safe_chat_completion(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-    )
+    response = _safe_responses_create(model="gpt-4o-mini", prompt=prompt)
+    news_data = _extract_response_text(response)
 
-    if completion and completion.choices:
+    if news_data:
+        if news_data.startswith("```json"):
+            news_data = news_data[len("```json") :].strip()
+        if news_data.endswith("```"):
+            news_data = news_data[: -len("```")].strip()
+
         try:
-            news_data = completion.choices[0].message.content.strip()
-        except (AttributeError, IndexError):
-            news_data = ""
-
-        if news_data:
-            if news_data.startswith("```json"):
-                news_data = news_data[len("```json") :].strip()
-            if news_data.endswith("```"):
-                news_data = news_data[: -len("```")].strip()
-
-            try:
-                parsed = json.loads(news_data)
-            except json.JSONDecodeError as exc:
-                print(f"Failed to parse AI news response: {exc}")
-            else:
-                if isinstance(parsed, dict):
-                    headline = sanitize_text(str(parsed.get("headline", "")).strip())
-                    summary = sanitize_text(str(parsed.get("summary", "")).strip())
-                    if headline and summary:
-                        cache_value = {"headline": headline, "summary": summary}
-                        _news_cache.update(
-                            {
-                                "expires": now + NEWS_CACHE_SUCCESS_TTL,
-                                "value": cache_value,
-                            }
-                        )
-                        return cache_value
-                    else:
-                        print("AI news response missing required text. Using fallback.")
-                else:
-                    print("AI news response not a dict. Using fallback.")
+            parsed = json.loads(news_data)
+        except json.JSONDecodeError as exc:
+            print(f"Failed to parse AI news response: {exc}")
+        else:
+            normalized = _normalize_news_payload(parsed)
+            if normalized:
+                _news_cache.update(
+                    {
+                        "expires": now + NEWS_CACHE_SUCCESS_TTL,
+                        "value": normalized,
+                        "status": "success",
+                    }
+                )
+                _save_news_cache_to_disk(normalized, "success")
+                return normalized
+            print("AI news response missing required fields. Using fallback.")
     else:
-        print("AI news request failed or returned no choices. Using fallback.")
+        print("AI news request failed or returned no content. Using fallback.")
+
+    fallback = fallback_value
+    if disk_cache and isinstance(disk_cache.get("value"), dict):
+        fallback = disk_cache["value"]
 
     _news_cache.update(
         {
             "expires": now + NEWS_CACHE_FAILURE_TTL,
-            "value": fallback_value,
+            "value": fallback,
+            "status": "failure",
         }
     )
-    return fallback_value
+    _save_news_cache_to_disk(fallback, "failure")
+    return fallback
 
 
 def get_weather_data(api_key, cache_file=None):
@@ -1718,8 +1896,18 @@ def add_news_overlay(frame, news):
         )
         cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
 
-        headline = textwrap.wrap(news["headline"], width=60)
-        summary = textwrap.wrap(news["summary"], width=60)
+        headline = textwrap.wrap(news.get("headline", ""), width=60)
+        summary = textwrap.wrap(news.get("summary", ""), width=60)
+        sources = news.get("sources", []) or []
+        if isinstance(sources, list):
+            sources_line = ", ".join(sources[:4])
+        else:
+            sources_line = ""
+        bias_label = news.get("bias", "Center")
+        bias_note = news.get("bias_note", "")
+        bias_text = f"Bias: {bias_label}"
+        if bias_note:
+            bias_text = f"{bias_text} ({bias_note})"
         y = y_start + 20
 
         cv2.putText(
@@ -1759,6 +1947,34 @@ def add_news_overlay(frame, news):
                 cv2.LINE_AA,
             )
             y += 25
+
+        if sources_line:
+            for line in textwrap.wrap(f"Sources: {sources_line}", width=70):
+                cv2.putText(
+                    frame,
+                    line,
+                    (10, y),
+                    font,
+                    font_scale * 0.75,
+                    font_color,
+                    thickness,
+                    cv2.LINE_AA,
+                )
+                y += 22
+
+        if bias_text:
+            for line in textwrap.wrap(bias_text, width=70):
+                cv2.putText(
+                    frame,
+                    line,
+                    (10, y),
+                    font,
+                    font_scale * 0.75,
+                    font_color,
+                    thickness,
+                    cv2.LINE_AA,
+                )
+                y += 22
 
         return frame
     except Exception as e:
