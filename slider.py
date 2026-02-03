@@ -89,6 +89,15 @@ num_transition_frames = int(transition_time * 30)
 api_key = os.getenv("WEATHERMAP_API_KEY") or os.getenv("OPENWEATHERMAP_API_KEY")
 openai_key = os.getenv("OPENAI_API_KEY")
 
+# Touch mode controls
+MODE_DEFINITIONS = [
+    {"mode": "random", "label": "Random"},
+    {"mode": "news", "label": "News"},
+    {"mode": "weather", "label": "Weather"},
+    {"mode": "pictures", "label": "Pics"},
+    {"mode": "video", "label": "Video"},
+]
+
 # Screen dimming based on ambient brightness (0-255 grayscale)
 BRIGHTNESS_DARK_THRESHOLD = 35.0          # tweak this up/down based on your room
 BRIGHTNESS_CHECK_INTERVAL = timedelta(seconds=15)  # how often to sample the camera
@@ -628,7 +637,7 @@ def show_frame(window_name: str, frame):
     cv2.imshow(window_name, prepared_frame)
     ensure_fullscreen(window_name)
 
-def present_frame(frame, temp, weather, status_text, ambient_dark):
+def present_frame(frame, temp, weather, status_text=None, ambient_dark=False, ui_state=None):
     """
     Final step before putting pixels on the screen.
 
@@ -641,6 +650,8 @@ def present_frame(frame, temp, weather, status_text, ambient_dark):
         show_frame("slideshow", black)
     else:
         overlay = add_time_overlay(frame, temp, weather, status_text=status_text)
+        if ui_state and overlay is not None:
+            overlay = draw_mode_buttons(overlay, ui_state["buttons"], ui_state["mode"])
         show_frame("slideshow", overlay)
 
 
@@ -2421,7 +2432,15 @@ def get_first_frame(video_path):
     return frame
 
 
-def play_video(video_path, temp, weather, status_text=None, ambient_dark=False):
+def play_video(
+    video_path,
+    temp,
+    weather,
+    status_text=None,
+    ambient_dark=False,
+    ui_state=None,
+    stop_check=None,
+):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"Could not open video {video_path}")
@@ -2443,10 +2462,19 @@ def play_video(video_path, temp, weather, status_text=None, ambient_dark=False):
         if frame is None:
             continue
         last_frame = frame.copy()
-        present_frame(frame, temp, weather, status_text=status_text, ambient_dark=ambient_dark)
+        present_frame(
+            frame,
+            temp,
+            weather,
+            status_text=status_text,
+            ambient_dark=ambient_dark,
+            ui_state=ui_state,
+        )
         key = cv2.waitKey(wait)
         if key == ord("q"):
             quit_requested = True
+            break
+        if stop_check and stop_check():
             break
 
     cap.release()
@@ -2545,6 +2573,61 @@ def release_camera():
     if _camera is not None:
         _camera.release()
         _camera = None
+
+
+def build_mode_buttons():
+    count = len(MODE_DEFINITIONS)
+    margin = 10
+    gap = 8
+    height = 44
+    y_pos = 8
+    total_width = frame_width - (margin * 2) - (gap * (count - 1))
+    button_width = max(80, int(total_width / count))
+
+    buttons = []
+    x_pos = margin
+    for entry in MODE_DEFINITIONS:
+        rect = (x_pos, y_pos, x_pos + button_width, y_pos + height)
+        buttons.append({"mode": entry["mode"], "label": entry["label"], "rect": rect})
+        x_pos += button_width + gap
+    return buttons
+
+
+def draw_mode_buttons(frame, buttons, active_mode):
+    if not buttons:
+        return frame
+
+    overlay = frame.copy()
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.5
+    thickness = 1
+
+    for button in buttons:
+        x1, y1, x2, y2 = button["rect"]
+        is_active = button["mode"] == active_mode
+        bg_color = (0, 130, 210) if is_active else (60, 60, 60)
+        border_color = (255, 255, 255)
+        text_color = (255, 255, 255)
+
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), bg_color, -1)
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), border_color, 1)
+
+        label = button["label"]
+        text_size, _ = cv2.getTextSize(label, font, font_scale, thickness)
+        text_x = x1 + (x2 - x1 - text_size[0]) // 2
+        text_y = y1 + (y2 - y1 + text_size[1]) // 2
+        cv2.putText(
+            overlay,
+            label,
+            (text_x, text_y),
+            font,
+            font_scale,
+            text_color,
+            thickness,
+            cv2.LINE_AA,
+        )
+
+    return overlay
 
 
 # ---------------------------------------------------------------------------
@@ -2653,6 +2736,52 @@ def build_display_frame(media_item, image_paths, forecast_5day):
 # Slideshow core
 # ---------------------------------------------------------------------------
 
+def build_display_frame_for_mode(media_item, image_paths, forecast_5day, mode):
+    if media_item["type"] != "image":
+        return None
+
+    if mode == "random":
+        return build_display_frame(media_item, image_paths, forecast_5day)
+
+    base_img = load_scaled_image(media_item["path"])
+    if base_img is None:
+        return None
+
+    if mode == "news":
+        frame = create_zoomed_blurred_background(base_img, frame_width, frame_height)
+        news = get_ai_generated_news()
+        return add_news_overlay(frame, news)
+
+    if mode == "weather":
+        frame = create_zoomed_blurred_background(base_img, frame_width, frame_height)
+        if forecast_5day and random.random() < 0.5:
+            return add_forecast_overlay(frame, forecast_5day)
+
+        city = "Waupun"
+        country_code = "US"
+        weather_data = get_weather_forecast2(api_key, city, country_code)
+        forecast_summary = "Weather summary unavailable."
+        custom_title = "Today's Forecast"
+
+        if weather_data:
+            forecast_summary, style_used = get_or_generate_forecast_summary(
+                weather_data, style="random"
+            )
+            custom_title = style_titles.get(style_used, "Today's Forecast")
+
+        return add_quote_overlay(
+            frame,
+            quote=forecast_summary,
+            source="Today's Weather",
+            title=custom_title,
+            style=None,
+        )
+
+    if mode == "pictures":
+        return create_single_image_with_background(base_img, frame_width, frame_height)
+
+    return build_display_frame(media_item, image_paths, forecast_5day)
+
 def run_slideshow_once():
     """
     Run one full slideshow session.
@@ -2718,9 +2847,33 @@ def run_slideshow_once():
     ensure_fullscreen("slideshow")
     hide_mouse_cursor()
 
+    buttons = build_mode_buttons()
+    mode_state = {
+        "mode": "random",
+        "dirty": True,
+        "fallback": False,
+        "buttons": buttons,
+    }
+
+    def handle_touch(event, x, y, flags, params):
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return
+        for button in buttons:
+            x1, y1, x2, y2 = button["rect"]
+            if x1 <= x <= x2 and y1 <= y <= y2:
+                new_mode = button["mode"]
+                if new_mode != mode_state["mode"]:
+                    mode_state["mode"] = new_mode
+                    mode_state["dirty"] = True
+                return
+
+    cv2.setMouseCallback("slideshow", handle_touch)
+
     index = 0
     current_item = media_items[index]
     play_queue = []
+    active_items = media_items[:]
+    active_image_paths = [item["path"] for item in active_items if item["type"] == "image"]
     last_refresh_time = datetime.now()
     exit_requested = False
     ambient_dark = False
@@ -2730,8 +2883,8 @@ def run_slideshow_once():
     current_frame = None
 
     def get_next_index(current_idx):
-        nonlocal play_queue, media_items
-        total = len(media_items)
+        nonlocal play_queue, active_items
+        total = len(active_items)
         if total <= 1:
             return current_idx
 
@@ -2742,11 +2895,45 @@ def run_slideshow_once():
             random.shuffle(play_queue)
         return play_queue.pop(0)
 
+    def get_mode_label(mode):
+        for entry in MODE_DEFINITIONS:
+            if entry["mode"] == mode:
+                return entry["label"]
+        return mode.title()
+
+    def rebuild_active_items(reason):
+        nonlocal active_items, active_image_paths, index, current_item, current_frame, play_queue
+        if mode_state["mode"] == "video":
+            filtered = [item for item in media_items if item["type"] == "video"]
+        elif mode_state["mode"] in {"news", "weather", "pictures"}:
+            filtered = [item for item in media_items if item["type"] == "image"]
+        else:
+            filtered = list(media_items)
+
+        if not filtered:
+            active_items = list(media_items)
+            mode_state["fallback"] = True
+        else:
+            active_items = filtered
+            mode_state["fallback"] = False
+
+        active_image_paths = [item["path"] for item in active_items if item["type"] == "image"]
+        index = 0
+        current_item = active_items[index]
+        current_frame = None
+        play_queue = []
+        mode_state["dirty"] = False
+        if reason:
+            print(reason)
+
     try:
         current_frame = None
+        rebuild_active_items("Touch mode ready: Random.")
 
         while True:
             now = datetime.now()
+            if mode_state["dirty"]:
+                rebuild_active_items(f"Mode switched to {get_mode_label(mode_state['mode'])}.")
 
             # ---------------------------------------------------------------
             # Ambient brightness / lights-on detection
@@ -2766,26 +2953,10 @@ def run_slideshow_once():
                 )
                 last_refresh_time = now
                 if refreshed_media is not None and refreshed_media:
-                    current_name = current_item["name"]
                     media_items = refreshed_media
                     local_metadata = new_metadata
                     downloaded_files = new_downloaded
-                    image_paths = [item["path"] for item in media_items if item["type"] == "image"]
-
-                    # Try to keep the same current item if it still exists
-                    new_index = next(
-                        (i for i, item in enumerate(media_items) if item["name"] == current_name),
-                        None,
-                    )
-                    if new_index is None:
-                        index = 0
-                        current_item = media_items[index]
-                    else:
-                        index = new_index
-                        current_item = media_items[index]
-
-                    current_frame = None  # force rebuild for new current_item
-                    play_queue = []
+                    mode_state["dirty"] = True
                     print("Media playlist refreshed.")
                 elif refreshed_media == []:
                     print("Drive folder is empty after refresh; keeping existing playlist.")
@@ -2799,16 +2970,27 @@ def run_slideshow_once():
                     forecast_5day = refreshed
 
             temp, weather = get_weather_data(api_key)
+            status_text = f"Mode: {get_mode_label(mode_state['mode'])}"
+            if mode_state["fallback"]:
+                status_text += " (fallback: no items)"
 
             # --- Display current item ---
             try:
                 if current_item["type"] == "video":
                     current_frame, quit_requested = play_video(
-                        current_item["path"], temp, weather, status_text=None, ambient_dark=ambient_dark
+                        current_item["path"],
+                        temp,
+                        weather,
+                        status_text=status_text,
+                        ambient_dark=ambient_dark,
+                        ui_state=mode_state,
+                        stop_check=lambda: mode_state["dirty"],
                     )
                     if quit_requested:
                         exit_requested = True
                         break
+                    if mode_state["dirty"]:
+                        continue
                     if current_frame is None:
                         current_frame = get_first_frame(current_item["path"])
                         if current_frame is None:
@@ -2818,28 +3000,42 @@ def run_slideshow_once():
                 else:
                     # For images, build the frame only once per "visit"
                     if current_frame is None:
-                        frame = build_display_frame(current_item, image_paths, forecast_5day)
+                        frame = build_display_frame_for_mode(
+                            current_item, active_image_paths, forecast_5day, mode_state["mode"]
+                        )
                         if frame is None:
                             print(
                                 f"Image {current_item['name']} could not be loaded; skipping."
                             )
-                            if len(media_items) > 1:
-                                media_items.pop(index)
-                                image_paths = [
-                                    item["path"] for item in media_items if item["type"] == "image"
+                            if len(active_items) > 1:
+                                media_items = [
+                                    item for item in media_items if item["name"] != current_item["name"]
                                 ]
-                                index %= len(media_items)
-                                current_item = media_items[index]
+                                mode_state["dirty"] = True
                                 continue
                             else:
                                 print("No valid media left to display.")
                                 return False
                         current_frame = frame
 
-                    present_frame(current_frame, temp, weather, status_text=None, ambient_dark=ambient_dark)
-                    if cv2.waitKey(display_time * 1000) == ord("q"):
-                        exit_requested = True
-                        break
+                    present_frame(
+                        current_frame,
+                        temp,
+                        weather,
+                        status_text=status_text,
+                        ambient_dark=ambient_dark,
+                        ui_state=mode_state,
+                    )
+                    wait_start = time.time()
+                    while time.time() - wait_start < display_time:
+                        key = cv2.waitKey(100)
+                        if key == ord("q"):
+                            exit_requested = True
+                            break
+                        if mode_state["dirty"]:
+                            break
+                    if exit_requested or mode_state["dirty"]:
+                        continue
             except KeyboardInterrupt:
                 exit_requested = True
                 break
@@ -2848,25 +3044,27 @@ def run_slideshow_once():
                     f"Error displaying item {current_item.get('name', '<unknown>')}: {exc}"
                 )
                 traceback.print_exc()
-                if len(media_items) <= 1:
+                if len(active_items) <= 1:
                     return False
-                index = (index + 1) % len(media_items)
-                current_item = media_items[index]
+                index = (index + 1) % len(active_items)
+                current_item = active_items[index]
                 continue
 
             if exit_requested:
                 break
 
             # --- Pick and prepare next item for transition ---
-            if len(media_items) > 1:
+            if len(active_items) > 1:
                 next_index = get_next_index(index)
-                next_item = media_items[next_index]
+                next_item = active_items[next_index]
 
                 next_frame = None
                 if next_item["type"] == "video":
                     next_frame = get_first_frame(next_item["path"])
                 else:
-                    next_frame = build_display_frame(next_item, image_paths, forecast_5day)
+                    next_frame = build_display_frame_for_mode(
+                        next_item, active_image_paths, forecast_5day, mode_state["mode"]
+                    )
 
                 if next_frame is None:
                     print(
@@ -2879,12 +3077,23 @@ def run_slideshow_once():
 
                     transition_fn = random.choice(transitions)
                     for frame in transition_fn(current_frame, next_frame, num_transition_frames):
-                        present_frame(frame, temp, weather, status_text=None, ambient_dark=ambient_dark)
+                        present_frame(
+                            frame,
+                            temp,
+                            weather,
+                            status_text=status_text,
+                            ambient_dark=ambient_dark,
+                            ui_state=mode_state,
+                        )
                         if cv2.waitKey(1) == ord("q"):
                             exit_requested = True
                             break
+                        if mode_state["dirty"]:
+                            break
                     if exit_requested:
                         break
+                    if mode_state["dirty"]:
+                        continue
 
                     # The frame we faded into becomes the new "current_frame"
                     current_frame = next_frame
