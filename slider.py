@@ -129,6 +129,8 @@ FORECAST_CACHE_TTL = timedelta(minutes=15)
 NEWS_CACHE_SUCCESS_TTL = timedelta(minutes=15)
 NEWS_CACHE_FAILURE_TTL = timedelta(minutes=3)
 NEWS_CACHE_FILE = resource_path("news_cache.json")
+NEWS_POOL_SIZE = 6
+NEWS_POOL_REFRESH_TTL = timedelta(hours=2)
 
 
 # ---------------------------------------------------------------------------
@@ -806,13 +808,15 @@ def get_weather_icon(description):
 
 _news_cache = {
     "expires": datetime.min,
-    "value": {
-        "headline": "News unavailable",
-        "summary": "No updates retrieved yet.",
-        "sources": [],
-        "bias": "Center",
-        "bias_note": "",
-    },
+    "pool": [
+        {
+            "headline": "News unavailable",
+            "summary": "No updates retrieved yet.",
+            "sources": [],
+            "bias": "Center",
+            "bias_note": "",
+        }
+    ],
     "status": "failure",
 }
 
@@ -836,25 +840,42 @@ def _load_news_cache_from_disk():
     except (TypeError, ValueError):
         return None
 
+    pool = payload.get("pool")
     value = payload.get("value")
     status = payload.get("status", "failure")
-    if not isinstance(value, dict):
+    if isinstance(pool, list) and pool:
+        normalized_pool = []
+        for entry in pool:
+            normalized = _normalize_news_payload(entry)
+            if normalized:
+                normalized_pool.append(normalized)
+        if not normalized_pool:
+            return None
+        pool = normalized_pool
+    elif isinstance(value, dict):
+        normalized = _normalize_news_payload(value)
+        if not normalized:
+            return None
+        pool = [normalized]
+    else:
         return None
 
     return {
         "timestamp": timestamp,
-        "value": value,
+        "pool": pool,
         "status": status if status in {"success", "failure"} else "failure",
     }
 
 
-def _save_news_cache_to_disk(value, status):
+def _save_news_cache_to_disk(pool, status):
     try:
+        first_value = pool[0] if isinstance(pool, list) and pool else None
         with open(NEWS_CACHE_FILE, "w") as handle:
             json.dump(
                 {
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "value": value,
+                    "pool": pool,
+                    "value": first_value,
                     "status": status,
                 },
                 handle,
@@ -991,10 +1012,35 @@ def _normalize_news_payload(parsed):
     }
 
 
+def _normalize_news_pool(parsed):
+    if isinstance(parsed, dict) and isinstance(parsed.get("stories"), list):
+        stories = parsed.get("stories")
+    elif isinstance(parsed, list):
+        stories = parsed
+    elif isinstance(parsed, dict):
+        normalized = _normalize_news_payload(parsed)
+        return [normalized] if normalized else None
+    else:
+        return None
+
+    normalized_pool = []
+    for entry in stories:
+        normalized = _normalize_news_payload(entry)
+        if normalized:
+            normalized_pool.append(normalized)
+        if len(normalized_pool) >= NEWS_POOL_SIZE:
+            break
+
+    if not normalized_pool:
+        return None
+
+    return normalized_pool
+
+
 def get_ai_generated_news():
     """Retrieve a short AI-generated news blurb with aggressive timeouts."""
     prompt = """
-Use web search to find a single, current news story from the last 48 hours.
+Use web search to find six current news stories from the last 48 hours.
 Focus on: US politics/economics/Wall Street, international relations/trade, or
 semiconductor/AI/science/technology policy. Avoid pop culture, celebrity, or
 gossip topics. Gather at least 3 similar articles from different outlets so
@@ -1002,13 +1048,17 @@ the summary avoids political bias. Summarize neutrally in 1-2 sentences.
 
 Return JSON ONLY:
 {
-  "headline": "A concise headline",
-  "summary": "Neutral 1-2 sentence summary",
-  "sources": [
-    {"name": "Outlet name", "url": "https://example.com/article"}
-  ],
-  "bias_label": "left|center|right",
-  "bias_note": "Short note on why this is the label (e.g., mixed sources)."
+  "stories": [
+    {
+      "headline": "A concise headline",
+      "summary": "Neutral 1-2 sentence summary",
+      "sources": [
+        {"name": "Outlet name", "url": "https://example.com/article"}
+      ],
+      "bias_label": "left|center|right",
+      "bias_note": "Short note on why this is the label (e.g., mixed sources)."
+    }
+  ]
 }
     """.strip()
 
@@ -1022,28 +1072,28 @@ Return JSON ONLY:
 
     now = datetime.now()
     cache_entry = _news_cache
-    if now < cache_entry["expires"]:
-        return cache_entry["value"]
+    if now < cache_entry["expires"] and cache_entry.get("pool"):
+        return random.choice(cache_entry["pool"])
 
     disk_cache = _load_news_cache_from_disk()
     if disk_cache:
         age = now - disk_cache["timestamp"]
-        ttl = NEWS_CACHE_SUCCESS_TTL if disk_cache["status"] == "success" else NEWS_CACHE_FAILURE_TTL
+        ttl = NEWS_POOL_REFRESH_TTL if disk_cache["status"] == "success" else NEWS_CACHE_FAILURE_TTL
         if age < ttl:
             _news_cache.update(
                 {
                     "expires": now + ttl,
-                    "value": disk_cache["value"],
+                    "pool": disk_cache["pool"],
                     "status": disk_cache["status"],
                 }
             )
-            return disk_cache["value"]
+            return random.choice(disk_cache["pool"])
 
     if client is None:
         _news_cache.update(
             {
                 "expires": now + NEWS_CACHE_FAILURE_TTL,
-                "value": fallback_value,
+                "pool": [fallback_value],
                 "status": "failure",
             }
         )
@@ -1063,34 +1113,34 @@ Return JSON ONLY:
         except json.JSONDecodeError as exc:
             print(f"Failed to parse AI news response: {exc}")
         else:
-            normalized = _normalize_news_payload(parsed)
-            if normalized:
+            normalized_pool = _normalize_news_pool(parsed)
+            if normalized_pool:
                 _news_cache.update(
                     {
-                        "expires": now + NEWS_CACHE_SUCCESS_TTL,
-                        "value": normalized,
+                        "expires": now + NEWS_POOL_REFRESH_TTL,
+                        "pool": normalized_pool,
                         "status": "success",
                     }
                 )
-                _save_news_cache_to_disk(normalized, "success")
-                return normalized
+                _save_news_cache_to_disk(normalized_pool, "success")
+                return random.choice(normalized_pool)
             print("AI news response missing required fields. Using fallback.")
     else:
         print("AI news request failed or returned no content. Using fallback.")
 
-    fallback = fallback_value
-    if disk_cache and isinstance(disk_cache.get("value"), dict):
-        fallback = disk_cache["value"]
+    fallback_pool = [fallback_value]
+    if disk_cache and isinstance(disk_cache.get("pool"), list) and disk_cache["pool"]:
+        fallback_pool = disk_cache["pool"]
 
     _news_cache.update(
         {
             "expires": now + NEWS_CACHE_FAILURE_TTL,
-            "value": fallback,
+            "pool": fallback_pool,
             "status": "failure",
         }
     )
-    _save_news_cache_to_disk(fallback, "failure")
-    return fallback
+    _save_news_cache_to_disk(fallback_pool, "failure")
+    return random.choice(fallback_pool)
 
 
 def get_weather_data(api_key, cache_file=None):
