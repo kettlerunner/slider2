@@ -995,8 +995,10 @@ def get_ai_generated_news():
     """Retrieve a short AI-generated news blurb with aggressive timeouts."""
     prompt = """
 Use web search to find a single, current news story from the last 48 hours.
-Gather at least 3 similar articles from different outlets so the summary avoids political bias.
-Summarize neutrally in 1-2 sentences.
+Focus on: US politics/economics/Wall Street, international relations/trade, or
+semiconductor/AI/science/technology policy. Avoid pop culture, celebrity, or
+gossip topics. Gather at least 3 similar articles from different outlets so
+the summary avoids political bias. Summarize neutrally in 1-2 sentences.
 
 Return JSON ONLY:
 {
@@ -1897,20 +1899,32 @@ def add_news_overlay(frame, news):
             return None
 
         font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.6
-        font_color = (255, 255, 255)
+        font_scale = 0.62
+        font_color = (35, 35, 35)
         thickness = 1
+        accent_color = (45, 90, 160)
+        title_color = (20, 55, 110)
+        panel_color = (245, 245, 245)
 
         overlay = frame.copy()
-        y_start = frame.shape[0] - 240
+        bar_height = _get_status_bar_height()
+        y_start = 0
+        panel_bottom = max(frame.shape[0] - bar_height, 0)
         cv2.rectangle(
             overlay,
             (0, y_start),
-            (frame.shape[1], frame.shape[0]),
-            (50, 50, 50),
+            (frame.shape[1], panel_bottom),
+            panel_color,
             -1,
         )
-        cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+        cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
+        cv2.rectangle(
+            frame,
+            (0, y_start),
+            (6, panel_bottom),
+            accent_color,
+            -1,
+        )
 
         headline = textwrap.wrap(news.get("headline", ""), width=60)
         summary = textwrap.wrap(news.get("summary", ""), width=60)
@@ -1924,29 +1938,31 @@ def add_news_overlay(frame, news):
         bias_text = f"Bias: {bias_label}"
         if bias_note:
             bias_text = f"{bias_text} ({bias_note})"
-        y = y_start + 20
+        y = y_start + 28
 
         cv2.putText(
             frame,
             "News Update:",
-            (10, y),
+            (18, y),
             font,
             font_scale,
-            font_color,
-            thickness,
+            title_color,
+            thickness + 1,
             cv2.LINE_AA,
         )
-        y += 30
+        y += 12
+        cv2.line(frame, (18, y), (frame.shape[1] - 18, y), (200, 200, 200), 1)
+        y += 22
 
         for line in headline:
             cv2.putText(
                 frame,
                 line,
-                (10, y),
+                (18, y),
                 font,
                 font_scale,
                 font_color,
-                thickness,
+                thickness + 1,
                 cv2.LINE_AA,
             )
             y += 30
@@ -1955,9 +1971,9 @@ def add_news_overlay(frame, news):
             cv2.putText(
                 frame,
                 line,
-                (10, y),
+                (18, y),
                 font,
-                font_scale * 0.8,
+                font_scale * 0.85,
                 font_color,
                 thickness,
                 cv2.LINE_AA,
@@ -1969,7 +1985,7 @@ def add_news_overlay(frame, news):
                 cv2.putText(
                     frame,
                     line,
-                    (10, y),
+                    (18, y),
                     font,
                     font_scale * 0.75,
                     font_color,
@@ -1983,7 +1999,7 @@ def add_news_overlay(frame, news):
                 cv2.putText(
                     frame,
                     line,
-                    (10, y),
+                    (18, y),
                     font,
                     font_scale * 0.75,
                     font_color,
@@ -1996,6 +2012,17 @@ def add_news_overlay(frame, news):
     except Exception as e:
         print(f"Error adding news overlay: {e}")
         return frame
+
+
+def _get_status_bar_height():
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.6
+    thickness = 1
+    sample_time = datetime.now().strftime("%B %d %Y, %I:%M %p")
+    sample_weather = "Temp: 99.9 F, Rain predicted"
+    text_size_time, _ = cv2.getTextSize(sample_time, font, font_scale, thickness)
+    text_size_weather, _ = cv2.getTextSize(sample_weather, font, font_scale, thickness)
+    return max(text_size_time[1], text_size_weather[1]) + 20
 
 
 def add_time_overlay(frame, temp, weather, status_text=None):
@@ -2036,7 +2063,7 @@ def add_time_overlay(frame, temp, weather, status_text=None):
         text_x_time = frame.shape[1] - text_size_time[0] - 10
 
         overlay_frame = frame.copy()
-        bar_height = max(text_size_time[1], text_size_weather[1]) + 20
+        bar_height = _get_status_bar_height()
         overlay = overlay_frame.copy()
         cv2.rectangle(
             overlay,
@@ -2495,12 +2522,15 @@ def build_display_frame(media_item, image_paths, forecast_5day):
     if 7 <= current_hour < 18:
         if current_day < 5:
             valid_display_types = ["single", "stitch", "quote", "forecast", "today", "news"]
+            weights = [2, 2, 2, 2, 2, 6]
         else:
-            valid_display_types = ["single", "stitch", "quote", "forecast", "today"]
+            valid_display_types = ["single", "stitch", "quote", "forecast", "today", "news"]
+            weights = [3, 2, 2, 2, 2, 3]
     else:
         valid_display_types = ["single", "quote", "today"]
+        weights = [3, 2, 2]
 
-    display_type = random.choice(valid_display_types)
+    display_type = random.choices(valid_display_types, weights=weights, k=1)[0]
 
     if display_type == "forecast":
         frame = create_zoomed_blurred_background(base_img, frame_width, frame_height)
