@@ -1308,12 +1308,18 @@ def ensure_same_channels(img1, img2):
     return img1, img2
 
 
+def _transition_alphas(num_frames):
+    if num_frames <= 1:
+        return [1.0]
+    return np.linspace(0, 1, num_frames, endpoint=True)
+
+
 def fade_transition(current_img, next_img, num_frames):
     current_img, next_img = ensure_same_channels(current_img, next_img)
     if current_img is None or next_img is None:
         return
 
-    for alpha in np.linspace(0, 1, num_frames):
+    for alpha in _transition_alphas(num_frames):
         blended = cv2.addWeighted(current_img, 1 - alpha, next_img, alpha, 0)
         yield blended
 
@@ -1324,8 +1330,7 @@ def slide_transition_left(current_img, next_img, num_frames):
         return
 
     height, width = current_img.shape[:2]
-    for i in range(num_frames):
-        alpha = i / float(num_frames)
+    for alpha in _transition_alphas(num_frames):
         dx = int(width * alpha)
         frame = np.zeros_like(current_img)
         if dx < width:
@@ -1341,8 +1346,7 @@ def slide_transition_right(current_img, next_img, num_frames):
         return
 
     height, width = current_img.shape[:2]
-    for i in range(num_frames):
-        alpha = i / float(num_frames)
+    for alpha in _transition_alphas(num_frames):
         dx = int(width * alpha)
         frame = np.zeros_like(current_img)
         if dx < width:
@@ -1358,8 +1362,7 @@ def wipe_transition_top(current_img, next_img, num_frames):
         return
 
     height, width = current_img.shape[:2]
-    for i in range(num_frames):
-        alpha = i / float(num_frames)
+    for alpha in _transition_alphas(num_frames):
         dy = int(height * alpha)
         frame = np.zeros_like(current_img)
         if dy < height:
@@ -1375,8 +1378,7 @@ def wipe_transition_bottom(current_img, next_img, num_frames):
         return
 
     height, width = current_img.shape[:2]
-    for i in range(num_frames):
-        alpha = i / float(num_frames)
+    for alpha in _transition_alphas(num_frames):
         dy = int(height * alpha)
         frame = np.zeros_like(current_img)
         if dy < height:
@@ -1396,8 +1398,7 @@ def melt_transition(current_img, next_img, num_frames):
     height, width = current_img.shape[:2]
     max_shift = int(height * 0.5)
 
-    for i in range(num_frames):
-        alpha = i / float(num_frames)
+    for alpha in _transition_alphas(num_frames):
         frame = next_img.copy().astype(np.float32)
 
         for r in range(height):
@@ -1432,8 +1433,7 @@ def wave_transition(current_img, next_img, num_frames):
     max_vertical_shift = int(height * 0.4)
     max_horizontal_shift = int(width * 0.02)
 
-    for i in range(num_frames):
-        alpha = i / float(num_frames)
+    for alpha in _transition_alphas(num_frames):
         frame = next_img.copy().astype(np.float32)
         row_alpha = 1 - alpha
 
@@ -1490,8 +1490,7 @@ def zen_ripple_transition(current_img, next_img, num_frames):
     ys, xs = np.indices((height, width))
     distances = np.sqrt((xs - center_x) ** 2 + (ys - center_y) ** 2)
 
-    for i in range(num_frames):
-        alpha = i / float(num_frames)
+    for alpha in _transition_alphas(num_frames):
         radius = alpha * max_radius
         blend_region = 10
         lower_bound = radius - blend_region
@@ -1550,8 +1549,7 @@ def dynamic_petal_bloom_transition(current_img, next_img, num_frames):
     angle_diff = angle_norm - petal_center_angle
     angle_diff = (angle_diff + math.pi) % (2 * math.pi) - math.pi
 
-    for i in range(num_frames):
-        alpha = i / float(num_frames)
+    for alpha in _transition_alphas(num_frames):
         frame = next_img.copy().astype(np.float32)
 
         radius_factor = 1 - inward_factor + alpha * (inward_factor + scale_factor)
