@@ -88,8 +88,9 @@ num_transition_frames = int(transition_time * 30)
 # API keys
 api_key = os.getenv("WEATHERMAP_API_KEY") or os.getenv("OPENWEATHERMAP_API_KEY")
 openai_key = os.getenv("OPENAI_API_KEY")
-OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-5.2-mini")
-OPENAI_NEWS_MODEL = os.getenv("OPENAI_NEWS_MODEL", "gpt-5.2-mini")
+OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+OPENAI_NEWS_MODEL = os.getenv("OPENAI_NEWS_MODEL", "gpt-4o-mini")
 
 # Touch mode controls
 MODE_DEFINITIONS = [
@@ -920,12 +921,36 @@ def _safe_responses_create(
     use_tools: bool = True,
 ):
     """Call OpenAI Responses API with optional web search support."""
-    if client is None:
+    if not openai_key:
         return None
 
-    if not hasattr(client, "responses"):
-        print("OpenAI client does not support Responses API. Update the openai package.")
-        return None
+    use_http = client is None or not hasattr(client, "responses")
+
+    if use_http:
+        payload = {"model": model, "input": prompt}
+        if use_tools:
+            payload["tools"] = [{"type": "web_search"}]
+
+        try:
+            response = requests.post(
+                f"{OPENAI_API_BASE}/responses",
+                headers={
+                    "Authorization": f"Bearer {openai_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=timeout,
+            )
+            response.raise_for_status()
+        except RequestException as exc:
+            print(f"OpenAI responses request failed: {exc}")
+            return None
+
+        try:
+            return response.json()
+        except ValueError as exc:
+            print(f"Failed to parse OpenAI responses JSON: {exc}")
+            return None
 
     import threading
 
@@ -995,6 +1020,24 @@ def _safe_responses_create(
 def _extract_response_text(response):
     if response is None:
         return ""
+    if isinstance(response, dict):
+        output_text = response.get("output_text")
+        if isinstance(output_text, str) and output_text.strip():
+            return output_text.strip()
+
+        output_items = response.get("output")
+        if isinstance(output_items, list):
+            chunks = []
+            for item in output_items:
+                for content in item.get("content", []) or []:
+                    if content.get("type") == "output_text":
+                        text = content.get("text", "")
+                        if text:
+                            chunks.append(text)
+            if chunks:
+                return "\n".join(chunks).strip()
+        return ""
+
     output_text = getattr(response, "output_text", None)
     if isinstance(output_text, str) and output_text.strip():
         return output_text.strip()
@@ -1129,7 +1172,7 @@ Return JSON ONLY:
             )
             return random.choice(disk_cache["pool"])
 
-    if client is None:
+    if not openai_key:
         _news_cache.update(
             {
                 "expires": now + NEWS_CACHE_FAILURE_TTL,
@@ -1282,7 +1325,7 @@ Here is the weather forecast for today:
 
     fallback_message = "Weather summary unavailable."
 
-    if client is None:
+    if not openai_key:
         return fallback_message, chosen_style, False
 
     response = _safe_responses_create(
