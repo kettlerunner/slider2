@@ -913,7 +913,12 @@ def _save_news_cache_to_disk(pool, status):
         print(f"Failed to write news cache: {exc}")
 
 
-def _safe_responses_create(model: str, prompt: str, timeout: int = REQUEST_TIMEOUT):
+def _safe_responses_create(
+    model: str,
+    prompt: str,
+    timeout: int = REQUEST_TIMEOUT,
+    use_tools: bool = True,
+):
     """Call OpenAI Responses API with optional web search support."""
     if client is None:
         return None
@@ -953,20 +958,26 @@ def _safe_responses_create(model: str, prompt: str, timeout: int = REQUEST_TIMEO
 
         return result_container.get("value"), None
 
-    attempts = [
-        {"model": model, "input": prompt, "tools": [{"type": "web_search"}]},
-        {"model": model, "input": prompt, "tools": [{"type": "web_search_preview"}]},
-        {
-            "model": model,
-            "input": [{"role": "user", "content": prompt}],
-            "tools": [{"type": "web_search"}],
-        },
-        {
-            "model": model,
-            "input": [{"role": "user", "content": prompt}],
-            "tools": [{"type": "web_search_preview"}],
-        },
-    ]
+    if use_tools:
+        attempts = [
+            {"model": model, "input": prompt, "tools": [{"type": "web_search"}]},
+            {"model": model, "input": prompt, "tools": [{"type": "web_search_preview"}]},
+            {
+                "model": model,
+                "input": [{"role": "user", "content": prompt}],
+                "tools": [{"type": "web_search"}],
+            },
+            {
+                "model": model,
+                "input": [{"role": "user", "content": prompt}],
+                "tools": [{"type": "web_search_preview"}],
+            },
+        ]
+    else:
+        attempts = [
+            {"model": model, "input": prompt},
+            {"model": model, "input": [{"role": "user", "content": prompt}]},
+        ]
 
     last_error = None
     for args in attempts:
@@ -1286,6 +1297,15 @@ Here is the weather forecast for today:
             summary = ""
         if summary:
             return sanitize_text(summary), chosen_style, True
+
+    response = _safe_responses_create(
+        model=OPENAI_CHAT_MODEL,
+        prompt=prompt,
+        use_tools=False,
+    )
+    response_text = _extract_response_text(response)
+    if response_text:
+        return sanitize_text(response_text), chosen_style, True
 
     print(f"Error generating forecast summary in {chosen_style} style. Using fallback.")
     return fallback_message, chosen_style, False
