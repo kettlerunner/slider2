@@ -1285,6 +1285,15 @@ Here is the weather forecast for today:
     if client is None:
         return fallback_message, chosen_style, False
 
+    response = _safe_responses_create(
+        model=OPENAI_CHAT_MODEL,
+        prompt=prompt,
+        use_tools=False,
+    )
+    response_text = _extract_response_text(response)
+    if response_text:
+        return sanitize_text(response_text), chosen_style, True
+
     completion = _safe_chat_completion(
         model=OPENAI_CHAT_MODEL,
         messages=[{"role": "user", "content": prompt}],
@@ -1297,15 +1306,6 @@ Here is the weather forecast for today:
             summary = ""
         if summary:
             return sanitize_text(summary), chosen_style, True
-
-    response = _safe_responses_create(
-        model=OPENAI_CHAT_MODEL,
-        prompt=prompt,
-        use_tools=False,
-    )
-    response_text = _extract_response_text(response)
-    if response_text:
-        return sanitize_text(response_text), chosen_style, True
 
     print(f"Error generating forecast summary in {chosen_style} style. Using fallback.")
     return fallback_message, chosen_style, False
