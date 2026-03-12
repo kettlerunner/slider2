@@ -1,88 +1,62 @@
+"""Slider2 launcher — pulls updates from git, then runs the slideshow package."""
+
 import os
-import hashlib
 import subprocess
+import sys
+import time
 
-import requests
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+GIT_TIMEOUT = 15  # seconds
+RETRY_DELAY = 10  # seconds
 
 
-# Base URL for your GitHub raw content
-BASE_GITHUB_RAW_URL = "https://raw.githubusercontent.com/kettlerunner/slider2/main/"
-
-# Network configuration
-REQUEST_TIMEOUT = 10  # seconds
-
-# List of files to update: (remote_file_name, local_file_path)
-FILES_TO_UPDATE = [
-    ("slider.py", "slider.py"),
-    ("quotes.json", "quotes.json")
-]
-
-def get_remote_file_hash_and_content(url):
+def git_pull():
+    """Attempt a fast-forward git pull. All failures are non-fatal."""
     try:
-        response = requests.get(url, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()  # Raise an error on bad status
-    except requests.RequestException as exc:
-        print(f"Failed to download {url}: {exc}")
-        return None, None
-
-    content = response.content
-    file_hash = hashlib.sha256(content).hexdigest()
-    return file_hash, content
-
-def get_local_file_hash(file_path):
-    if not os.path.exists(file_path):
-        return None
-    with open(file_path, 'rb') as f:
-        return hashlib.sha256(f.read()).hexdigest()
-
-def download_file(url, file_path, content=None):
-    if content is None:
-        try:
-            response = requests.get(url, timeout=REQUEST_TIMEOUT)
-            response.raise_for_status()
-            content = response.content
-        except requests.RequestException as exc:
-            print(f"Failed to download {url}: {exc}")
-            return False
-
-    try:
-        with open(file_path, 'wb') as f:
-            f.write(content)
-    except OSError as exc:
-        print(f"Failed to write to {file_path}: {exc}")
-        return False
-
-    return True
-
-def update_file(remote_file_name, local_file_path):
-    url = BASE_GITHUB_RAW_URL + remote_file_name
-    remote_hash, remote_content = get_remote_file_hash_and_content(url)
-    if remote_hash is None:
-        print(f"Skipping update for {local_file_path} due to download error.")
-        return
-    local_hash = get_local_file_hash(local_file_path)
-
-    if local_hash != remote_hash:
-        print(f"Updating {local_file_path}...")
-        if download_file(url, local_file_path, content=remote_content):
-            print(f"{local_file_path} has been updated.")
+        result = subprocess.run(
+            ["git", "pull", "--ff-only"],
+            cwd=SCRIPT_DIR,
+            capture_output=True,
+            text=True,
+            timeout=GIT_TIMEOUT,
+        )
+        if result.returncode == 0:
+            output = result.stdout.strip()
+            if output:
+                print(f"Update: {output}")
         else:
-            print(f"Failed to update {local_file_path}.")
-    else:
-        print(f"{local_file_path} is up-to-date.")
+            print(f"git pull failed: {result.stderr.strip()}")
+    except FileNotFoundError:
+        print("git not found. Skipping update check.")
+    except subprocess.TimeoutExpired:
+        print("git pull timed out. Running with current code.")
+    except Exception as exc:
+        print(f"Update check failed: {exc}")
+
 
 def main():
-    try:
-        for remote_file_name, local_file_path in FILES_TO_UPDATE:
-            update_file(remote_file_name, local_file_path)
-        
-        print("Running slider.py...")
+    git_pull()
+    print("Starting slideshow...")
+
+    while True:
         try:
-            subprocess.run(["python", "slider.py"], check=True)
-        except subprocess.CalledProcessError as exc:
-            print(f"slider.py exited with an error: {exc}")
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+            result = subprocess.run(
+                [sys.executable, "-m", "slider"],
+                cwd=SCRIPT_DIR,
+            )
+            if result.returncode == 0:
+                print("Slideshow exited cleanly.")
+                break
+        except KeyboardInterrupt:
+            print("Received interrupt. Shutting down.")
+            break
+        except Exception as exc:
+            print(f"Slideshow crashed: {exc}")
+
+        print(f"Restarting in {RETRY_DELAY}s...")
+        time.sleep(RETRY_DELAY)
+        git_pull()  # Check for updates before restart
+
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,28 @@
+{
+  "display": {
+    "width": 800,
+    "height": 480,
+    "transition_time": 2,
+    "display_time": 30,
+    "fps": 30
+  },
+  "weather": {
+    "current_city": "Waupun",
+    "forecast_city": "Fond du Lac",
+    "country_code": "US"
+  },
+  "google_drive": {
+    "folder_id": "1hpBzZ_kiXpIBtRv1FN3da8zOhT5J0Ggi"
+  },
+  "camera": {
+    "index": 1,
+    "brightness_dark_threshold": 35.0,
+    "brightness_check_interval_seconds": 15
+  },
+  "openai": {
+    "chat_model": "gpt-4o-mini",
+    "news_model": "gpt-4o-mini",
+    "request_timeout": 30
+  },
+  "low_power_mode": "auto"
+}

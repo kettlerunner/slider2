@@ -1,0 +1,7 @@
+opencv-python>=4.5,<5.0
+numpy>=1.21,<2.0
+requests>=2.25,<3.0
+google-auth>=2.0,<3.0
+google-auth-oauthlib>=1.0,<2.0
+google-api-python-client>=2.0,<3.0
+openai>=1.50,<3.0

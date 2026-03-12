@@ -1,22 +1,5 @@
-import ast
-import re
-from pathlib import Path
+from slider.utils import sanitize_text
 
-
-def load_sanitize_text():
-    slider_path = Path(__file__).resolve().parents[1] / "slider.py"
-    source = slider_path.read_text(encoding="utf-8")
-    module = ast.parse(source)
-    for node in module.body:
-        if isinstance(node, ast.FunctionDef) and node.name == "sanitize_text":
-            code = ast.get_source_segment(source, node)
-            ns = {"re": re}
-            exec(code, ns)
-            return ns["sanitize_text"]
-    raise RuntimeError("sanitize_text not found")
-
-
-sanitize_text = load_sanitize_text()
 
 def test_curly_quotes_and_dashes():
     text = '“Hello” – “World” — test'

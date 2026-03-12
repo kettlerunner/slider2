@@ -1,0 +1,16 @@
+# Credentials
+token.json
+credentials.json
+
+# Local caches
+images/
+metadata.json
+weather_cache.json
+forecast_cache.json
+news_cache.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
