@@ -1,114 +1,200 @@
-"""Overlay rendering — forecast, news, time/weather status bar, and quotes."""
+"""Overlay rendering: status bar (HUD), 5-day forecast, news, and quote panels.
 
-import textwrap
-from datetime import datetime
+All functions expect a BGR uint8 frame. The panel overlays draw in place and
+return the same frame; draw_hud returns a new frame so the underlying slide
+can be re-used for the next redraw. Text is wrapped by measured pixel width,
+and the quote/news panels shrink their fonts until the content fits.
+"""
 
 import cv2
 import numpy as np
 
-from slider import config
-from slider.image_processing import normalize_frame_for_display
-from slider.utils import sanitize_text
-from slider.weather import get_weather_icon
+from slider.image_processing import paste
+from slider.touch_ui import draw_mode_buttons
+from slider.utils import now_local, sanitize_text
+from slider.weather import format_clock, get_weather_icon
+
+FONT = cv2.FONT_HERSHEY_SIMPLEX
+WHITE = (255, 255, 255)
+BAR_COLOR = (50, 50, 50)
 
 
 # ---------------------------------------------------------------------------
-# Status bar height helper
+# Text helpers
 # ---------------------------------------------------------------------------
 
-def _get_status_bar_height():
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.6
-    thickness = 1
-    sample_time = datetime.now().strftime("%B %d %Y, %I:%M %p")
-    sample_weather = "Temp: 99.9 F, Rain predicted"
-    text_size_time, _ = cv2.getTextSize(sample_time, font, font_scale, thickness)
-    text_size_weather, _ = cv2.getTextSize(sample_weather, font, font_scale, thickness)
-    return max(text_size_time[1], text_size_weather[1]) + 20
+def text_size(text, scale, thickness=1):
+    """Return (width, height, baseline) of text in pixels."""
+    (w, h), baseline = cv2.getTextSize(text, FONT, scale, thickness)
+    return w, h, baseline
+
+
+def line_advance(scale, thickness=1, spacing=1.55):
+    """Vertical distance between consecutive text lines at a font scale."""
+    _, h, baseline = text_size("Ag", scale, thickness)
+    return int(round((h + baseline) * spacing))
+
+
+def wrap_text(text, scale, max_width, thickness=1):
+    """Word-wrap text so no line is wider than max_width pixels.
+
+    Explicit newlines start new lines; blank lines are preserved as "".
+    """
+    lines = []
+    for paragraph in str(text).split("\n"):
+        words = paragraph.split()
+        if not words:
+            lines.append("")
+            continue
+        current = ""
+        for word in words:
+            candidate = f"{current} {word}" if current else word
+            if text_size(candidate, scale, thickness)[0] <= max_width or not current:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+            # Break words that are wider than the whole line.
+            while text_size(current, scale, thickness)[0] > max_width and len(current) > 1:
+                cut = len(current) - 1
+                while cut > 1 and text_size(current[:cut], scale, thickness)[0] > max_width:
+                    cut -= 1
+                lines.append(current[:cut])
+                current = current[cut:]
+        lines.append(current)
+    return lines
+
+
+def put_text(frame, text, x, y, scale, color, thickness=1):
+    cv2.putText(frame, text, (int(x), int(y)), FONT, scale, color, thickness, cv2.LINE_AA)
+
+
+def blend_rect(frame, x0, y0, x1, y1, color, alpha):
+    """Blend a solid color rectangle onto the frame in place (only the ROI is touched)."""
+    h, w = frame.shape[:2]
+    x0, y0 = max(0, int(x0)), max(0, int(y0))
+    x1, y1 = min(w, int(x1)), min(h, int(y1))
+    if x1 <= x0 or y1 <= y0:
+        return
+    roi = frame[y0:y1, x0:x1]
+    solid = np.empty_like(roi)
+    solid[:] = color
+    roi[:] = cv2.addWeighted(roi, 1.0 - alpha, solid, alpha, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Status bar (HUD)
+# ---------------------------------------------------------------------------
+
+_status_bar_height = None
+
+
+def status_bar_height():
+    global _status_bar_height
+    if _status_bar_height is None:
+        _, h_time, base_time = text_size("September 30 2026, 12:00 PM", 0.6)
+        _, h_weather, base_weather = text_size("72 F, feels 68, light rain", 0.6)
+        _status_bar_height = max(h_time + base_time, h_weather + base_weather) + 16
+    return _status_bar_height
+
+
+def format_conditions(current):
+    """One-line summary of current conditions for the status bar."""
+    if not current or current.get("temp") is None:
+        return "Weather data unavailable"
+    temp = round(current["temp"])
+    parts = [f"{temp} F"]
+    feels = current.get("feels_like")
+    if feels is not None and abs(round(feels) - temp) >= 3:
+        parts.append(f"feels {round(feels)}")
+    description = sanitize_text(current.get("description") or current.get("main") or "")
+    if description:
+        parts.append(description)
+    wind = current.get("wind_speed") or 0
+    if wind >= 15:
+        parts.append(f"wind {round(wind)} mph")
+    return ", ".join(parts)
+
+
+def draw_hud(frame, hud, now=None):
+    """Return a copy of frame with the status bar, mode label, and buttons drawn."""
+    now = now or now_local()
+    out = frame.copy()
+    h, w = out.shape[:2]
+    bar_h = status_bar_height()
+    blend_rect(out, 0, h - bar_h, w, h, BAR_COLOR, 0.8)
+
+    text_y = h - 12
+    conditions = format_conditions(hud.weather)
+    put_text(out, conditions, 10, text_y, 0.6, WHITE)
+    time_text = now.strftime("%B %d %Y, %I:%M %p")
+    time_w = text_size(time_text, 0.6)[0]
+    put_text(out, time_text, w - time_w - 10, text_y, 0.6, WHITE)
+
+    if hud.status_text:
+        # Centered in the free space of the bar so it never covers panel headers.
+        left_edge = text_size(conditions, 0.6)[0] + 30
+        right_edge = w - time_w - 30
+        status_w = text_size(hud.status_text, 0.5)[0]
+        if right_edge - left_edge >= status_w:
+            put_text(out, hud.status_text, (left_edge + right_edge - status_w) // 2, text_y, 0.5, (200, 200, 200))
+
+    if hud.show_buttons and hud.buttons:
+        draw_mode_buttons(out, hud.buttons, hud.mode)
+    return out
 
 
 # ---------------------------------------------------------------------------
 # 5-day forecast overlay
 # ---------------------------------------------------------------------------
 
-def add_forecast_overlay(frame, forecast):
-    """Render the 5-day forecast on a frame."""
+def add_forecast_overlay(frame, forecast, current=None):
+    """Draw the 5-day forecast panel across the top of the frame (in place)."""
     try:
-        frame = normalize_frame_for_display(frame, enforce_size=False)
-        if frame is None:
-            return None
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.5
-        font_color = (255, 255, 255)
-        thickness = 1
+        h, w = frame.shape[:2]
+        panel_h = min(232, h - status_bar_height() - 8)
+        blend_rect(frame, 0, 0, w, panel_h, BAR_COLOR, 0.7)
+        put_text(frame, "5-Day Forecast", 10, 30, 0.8, WHITE, 2)
 
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (0, 0), (frame.shape[1], 224), (50, 50, 50), -1)
-        cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+        if current and current.get("sunrise") and current.get("sunset"):
+            sun_text = f"Sunrise {format_clock(current['sunrise'])}   Sunset {format_clock(current['sunset'])}"
+            sun_w = text_size(sun_text, 0.45)[0]
+            put_text(frame, sun_text, w - sun_w - 12, 28, 0.45, WHITE)
 
-        cv2.putText(frame, "5-Day Forecast", (10, 30), font, 0.8, font_color, 2, cv2.LINE_AA)
+        if not forecast:
+            put_text(frame, "Forecast data unavailable", 10, 100, 0.5, WHITE)
+            return frame
 
-        if forecast:
-            col_width = frame.shape[1] // 5
-            for i, day in enumerate(forecast):
-                x = i * col_width + 10
-                y = 60
+        days = forecast[:5]
+        col_w = w // max(1, len(days))
+        icon_size = 56
+        for i, day in enumerate(days):
+            x = i * col_w + 10
+            date_text = str(day.get("date", ""))
+            weekday, _, month_day = date_text.partition(",")
+            put_text(frame, weekday.strip(), x, 58, 0.55, WHITE, 2)
+            put_text(frame, month_day.strip(), x, 80, 0.45, WHITE)
 
-                cv2.putText(frame, day["date"].split(",")[0], (x, y),
-                            font, font_scale, font_color, thickness, cv2.LINE_AA)
-                y += 25
-                cv2.putText(frame, day["date"].split(",")[1].strip(), (x, y),
-                            font, font_scale, font_color, thickness, cv2.LINE_AA)
-                y += 35
+            icon = get_weather_icon(day.get("description", ""), icon_size)
+            if icon is not None:
+                paste(frame, icon, 90, x + 10)
 
-                temp_text = f"{day['temp_min']:.1f} - {day['temp_max']:.1f} F"
-                cv2.putText(frame, temp_text, (x, y),
-                            font, font_scale, font_color, thickness, cv2.LINE_AA)
-                y += 35
+            try:
+                temp_text = f"{round(day['temp_min'])} - {round(day['temp_max'])} F"
+            except (KeyError, TypeError, ValueError):
+                temp_text = ""
+            put_text(frame, temp_text, x, 168, 0.5, WHITE)
 
-                icon_img = get_weather_icon(day["description"])
-                if icon_img is not None:
-                    icon_size = 64
-                    icon_img = cv2.resize(icon_img, (icon_size, icon_size))
-                    icon_y_offset = y - 20
-                    icon_x_offset = x + 20
+            desc_lines = wrap_text(sanitize_text(day.get("description", "")), 0.45, col_w - 16)
+            put_text(frame, desc_lines[0] if desc_lines else "", x, 190, 0.45, WHITE)
 
-                    if (0 <= icon_y_offset < frame.shape[0] - icon_size
-                            and 0 <= icon_x_offset < frame.shape[1] - icon_size):
-                        if icon_img.ndim == 3 and icon_img.shape[2] == 4:
-                            alpha = icon_img[:, :, 3] / 255.0
-                            alpha = alpha[:, :, np.newaxis]
-                            for c in range(3):
-                                frame[
-                                    icon_y_offset:icon_y_offset + icon_size,
-                                    icon_x_offset:icon_x_offset + icon_size,
-                                    c,
-                                ] = (
-                                    icon_img[:, :, c] * alpha[:, :, 0]
-                                    + frame[
-                                        icon_y_offset:icon_y_offset + icon_size,
-                                        icon_x_offset:icon_x_offset + icon_size,
-                                        c,
-                                    ] * (1 - alpha[:, :, 0])
-                                )
-                        else:
-                            frame[
-                                icon_y_offset:icon_y_offset + icon_size,
-                                icon_x_offset:icon_x_offset + icon_size,
-                            ] = icon_img
-
-                    y += 64
-
-                desc = day["description"]
-                cv2.putText(frame, desc, (x, y),
-                            font, font_scale * 0.9, font_color, thickness, cv2.LINE_AA)
-        else:
-            cv2.putText(frame, "Forecast data unavailable", (10, 100),
-                        font, font_scale, font_color, thickness, cv2.LINE_AA)
-
+            pop = day.get("pop") or 0
+            if pop >= 0.1:
+                kind = "Snow" if "snow" in str(day.get("description", "")).lower() else "Rain"
+                put_text(frame, f"{kind} {int(round(pop * 100))}%", x, 212, 0.42, (255, 210, 150))
         return frame
-    except Exception as e:
-        print(f"Error adding forecast overlay: {e}")
+    except Exception as exc:
+        print(f"Error adding forecast overlay: {exc}")
         return frame
 
 
@@ -116,277 +202,135 @@ def add_forecast_overlay(frame, forecast):
 # News overlay
 # ---------------------------------------------------------------------------
 
-def add_news_overlay(frame, news):
-    """Render a news article overlay on a frame."""
+def add_news_overlay(frame, story, fetched_at=None):
+    """Draw a news story panel over the frame (in place)."""
     try:
-        frame = normalize_frame_for_display(frame, enforce_size=False)
-        if frame is None:
-            return None
-
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.62
-        font_color = (35, 35, 35)
-        thickness = 1
-        accent_color = (45, 90, 160)
+        h, w = frame.shape[:2]
+        panel_bottom = max(h - status_bar_height(), 0)
+        text_color = (35, 35, 35)
+        muted = (110, 110, 110)
+        accent = (45, 90, 160)
         title_color = (20, 55, 110)
-        panel_color = (245, 245, 245)
 
-        overlay = frame.copy()
-        bar_height = _get_status_bar_height()
-        y_start = 0
-        panel_bottom = max(frame.shape[0] - bar_height, 0)
-        cv2.rectangle(overlay, (0, y_start), (frame.shape[1], panel_bottom), panel_color, -1)
-        cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
-        cv2.rectangle(frame, (0, y_start), (6, panel_bottom), accent_color, -1)
+        blend_rect(frame, 0, 0, w, panel_bottom, (245, 245, 245), 0.85)
+        cv2.rectangle(frame, (0, 0), (6, panel_bottom), accent, -1)
 
-        headline = textwrap.wrap(news.get("headline", ""), width=60)
-        summary = textwrap.wrap(news.get("summary", ""), width=60)
-        sources = news.get("sources", []) or []
-        if isinstance(sources, list):
-            sources_line = ", ".join(sources[:4])
-        else:
-            sources_line = ""
-        bias_label = news.get("bias", "Center")
-        bias_note = news.get("bias_note", "")
-        bias_text = f"Bias: {bias_label}"
-        if bias_note:
-            bias_text = f"{bias_text} ({bias_note})"
-        y = y_start + 28
+        story = story or {}
+        headline = sanitize_text(story.get("headline", ""))
+        summary = sanitize_text(story.get("summary", ""))
+        why = sanitize_text(story.get("why_it_matters", ""))
+        sources = [s for s in (story.get("sources") or []) if isinstance(s, str)]
+        bias_text = f"Bias: {story.get('bias', 'Center')}"
+        if story.get("bias_note"):
+            bias_text += f" ({sanitize_text(story['bias_note'])})"
 
-        cv2.putText(frame, "News Update:", (18, y),
-                    font, font_scale, title_color, thickness + 1, cv2.LINE_AA)
-        y += 12
-        cv2.line(frame, (18, y), (frame.shape[1] - 18, y), (200, 200, 200), 1)
-        y += 22
+        x = 18
+        max_w = w - x - 18
+        top = 28
+        put_text(frame, "News Update", x, top, 0.62, title_color, 2)
 
-        for line in headline:
-            cv2.putText(frame, line, (18, y),
-                        font, font_scale, font_color, thickness + 1, cv2.LINE_AA)
-            y += 30
+        meta_parts = []
+        if story.get("category"):
+            meta_parts.append(str(story["category"]))
+        if fetched_at is not None:
+            meta_parts.append(f"as of {fetched_at.strftime('%I:%M %p').lstrip('0')}")
+        if meta_parts:
+            meta = "  |  ".join(meta_parts)
+            put_text(frame, meta, w - text_size(meta, 0.45)[0] - 16, top, 0.45, muted)
+        cv2.line(frame, (x, top + 12), (w - 18, top + 12), (200, 200, 200), 1)
 
-        for line in summary:
-            cv2.putText(frame, line, (18, y),
-                        font, font_scale * 0.85, font_color, thickness, cv2.LINE_AA)
-            y += 25
+        available = panel_bottom - (top + 34) - 8
+        for scale in (1.0, 0.92, 0.85, 0.78, 0.7, 0.62):
+            s_head, s_body, s_small = 0.72 * scale, 0.55 * scale, 0.46 * scale
+            blocks = [
+                (wrap_text(headline, s_head, max_w, 2), s_head, text_color, 2, line_advance(s_head, 2)),
+                (wrap_text(summary, s_body, max_w), s_body, text_color, 1, line_advance(s_body)),
+            ]
+            if why:
+                blocks.append((wrap_text(f"Why it matters: {why}", s_small, max_w), s_small, accent, 1, line_advance(s_small)))
+            if sources:
+                blocks.append((wrap_text("Sources: " + ", ".join(sources[:4]), s_small, max_w), s_small, muted, 1, line_advance(s_small)))
+            blocks.append((wrap_text(bias_text, s_small, max_w), s_small, muted, 1, line_advance(s_small)))
+            total = sum(len(lines) * adv + 8 for lines, _, _, _, adv in blocks)
+            if total <= available:
+                break
 
-        if sources_line:
-            for line in textwrap.wrap(f"Sources: {sources_line}", width=70):
-                cv2.putText(frame, line, (18, y),
-                            font, font_scale * 0.75, font_color, thickness, cv2.LINE_AA)
-                y += 22
-
-        if bias_text:
-            for line in textwrap.wrap(bias_text, width=70):
-                cv2.putText(frame, line, (18, y),
-                            font, font_scale * 0.75, font_color, thickness, cv2.LINE_AA)
-                y += 22
-
+        y = top + 34
+        for lines, scale_used, color, thickness, adv in blocks:
+            for line in lines:
+                y += adv
+                put_text(frame, line, x, y - 4, scale_used, color, thickness)
+            y += 8
         return frame
-    except Exception as e:
-        print(f"Error adding news overlay: {e}")
+    except Exception as exc:
+        print(f"Error adding news overlay: {exc}")
         return frame
 
 
 # ---------------------------------------------------------------------------
-# Time + weather status bar
-# ---------------------------------------------------------------------------
-
-def add_time_overlay(frame, temp, weather, status_text=None):
-    """Render time and weather info in a bottom status bar."""
-    try:
-        frame = normalize_frame_for_display(frame, enforce_size=False)
-        if frame is None:
-            return None
-
-        time_text = datetime.now().strftime("%B %d %Y, %I:%M %p")
-        if temp is not None:
-            weather_text = f"Temp: {temp:.1f} F"
-        else:
-            weather_text = "Weather data unavailable"
-
-        if weather:
-            w = weather.lower()
-            if "rain" in w:
-                weather_text += ", Raining" if "drizzle" in w else ", Rain predicted"
-            elif "snow" in w:
-                weather_text += ", Snowing" if "flurries" in w else ", Snow predicted"
-
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.6
-        font_color = (255, 255, 255)
-        thickness = 1
-
-        text_size_time, _ = cv2.getTextSize(time_text, font, font_scale, thickness)
-        text_y = frame.shape[0] - 12
-        text_x_weather = 10
-        text_x_time = frame.shape[1] - text_size_time[0] - 10
-
-        overlay_frame = frame.copy()
-        bar_height = _get_status_bar_height()
-        overlay = overlay_frame.copy()
-        cv2.rectangle(overlay, (0, frame.shape[0] - bar_height),
-                      (frame.shape[1], frame.shape[0]), (50, 50, 50), -1)
-        alpha = 0.8
-        cv2.addWeighted(overlay, alpha, overlay_frame, 1 - alpha, 0, overlay_frame)
-
-        cv2.putText(overlay_frame, weather_text, (text_x_weather, text_y),
-                    font, font_scale, font_color, thickness, cv2.LINE_AA)
-        cv2.putText(overlay_frame, time_text, (text_x_time, text_y),
-                    font, font_scale, font_color, thickness, cv2.LINE_AA)
-
-        if status_text:
-            status_font_scale = 0.5
-            status_thickness = 1
-            status_size, _ = cv2.getTextSize(status_text, font, status_font_scale, status_thickness)
-            status_position = (frame.shape[1] - status_size[0] - 10, 30)
-            cv2.putText(overlay_frame, status_text,
-                        (status_position[0] + 1, status_position[1] + 1),
-                        font, status_font_scale, (0, 0, 0), status_thickness, cv2.LINE_AA)
-            cv2.putText(overlay_frame, status_text, status_position,
-                        font, status_font_scale, font_color, status_thickness, cv2.LINE_AA)
-
-        return overlay_frame
-    except Exception as e:
-        print(f"Error adding overlay: {e}")
-        return frame
-
-
-# ---------------------------------------------------------------------------
-# Quote overlay
+# Quote overlay (also used for AI weather summaries and status messages)
 # ---------------------------------------------------------------------------
 
 def add_quote_overlay(frame, quote, source="", title=None, style=None):
-    """Render a motivational quote in a centered overlay box."""
+    """Draw a centered card with an optional title bar, the text, and its source."""
     try:
-        frame = normalize_frame_for_display(frame, enforce_size=False)
-        if frame is None:
-            return None
-        MIN_BOX_WIDTH = 600
-
+        h, w = frame.shape[:2]
         quote = sanitize_text(quote)
-        if title:
-            title = sanitize_text(title)
+        title = sanitize_text(title) if title else ""
         source = sanitize_text(source) if source else ""
-        style = sanitize_text(style) if style else ""
+        if source.strip().lower() == "today's weather":  # legacy caller convention
+            source = ""
 
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale_quote = 0.8
-        font_scale_source = 0.6
-        font_scale_title = 0.9
+        available_h = h - status_bar_height() - 16
+        max_box_w = w - 32
+        min_box_w = min(600, max_box_w)
+        text_color = (105, 105, 105)
+        title_color = (230, 230, 230)
 
-        font_color = (105, 105, 105)
-        font_color_title = (230, 230, 230)
-        box_color = (255, 255, 255)
-        title_bar_color = (50, 50, 50)
-        thickness = 1
+        for scale in (1.0, 0.9, 0.8, 0.72, 0.64, 0.56, 0.48):
+            s_quote, s_title, s_source = 0.8 * scale, 0.9 * scale, 0.6 * scale
+            text_w = max_box_w - 40
+            quote_lines = wrap_text(quote, s_quote, text_w)
+            title_lines = wrap_text(title, s_title, text_w) if title else []
+            source_lines = wrap_text(f"- {source}", s_source, text_w) if source else []
+            adv_quote, adv_title, adv_source = line_advance(s_quote), line_advance(s_title), line_advance(s_source)
 
-        raw_quote_lines = quote.split("\n")
-        quote_lines = []
-        for raw_line in raw_quote_lines:
-            if raw_line.strip():
-                wrapped = textwrap.wrap(raw_line.strip(), width=50)
-            else:
-                wrapped = [""]
-            quote_lines.extend(wrapped)
+            title_h = len(title_lines) * adv_title + 16 if title_lines else 0
+            body_h = len(quote_lines) * adv_quote + (len(source_lines) * adv_source + 12 if source_lines else 0)
+            box_h = title_h + body_h + 40
 
-        title_lines = textwrap.wrap(title, width=50) if title else []
+            widths = [text_size(line, s_quote)[0] for line in quote_lines if line]
+            widths += [text_size(line, s_title)[0] for line in title_lines]
+            widths += [text_size(line, s_source)[0] for line in source_lines]
+            box_w = min(max_box_w, max(min_box_w, (max(widths) if widths else 200) + 40))
+            if box_h <= available_h:
+                break
 
-        if source.strip().lower() == "today's weather":
-            source_lines = []
-        else:
-            source_lines = textwrap.wrap(f"- {source}", width=50) if source else []
+        box_x = (w - box_w) // 2
+        box_y = max(8, (available_h - box_h) // 2 + 8)
+        blend_rect(frame, box_x, box_y, box_x + box_w, box_y + box_h, WHITE, 0.8)
 
-        line_height_quote = cv2.getTextSize("Test", font, font_scale_quote * 1.3, thickness)[0][1]
-        line_height_title = cv2.getTextSize("Test", font, font_scale_title * 1.3, thickness)[0][1]
-        line_height_source = (
-            cv2.getTextSize("Test", font, font_scale_source * 1.3, thickness)[0][1]
-            if source_lines else 0
-        )
-
-        text_height = 0
-        title_height = 0
+        y = box_y
         if title_lines:
-            title_height = line_height_title * len(title_lines) + 20
-            text_height += title_height
-
-        text_height += line_height_quote * len(quote_lines)
-        if source_lines:
-            text_height += 20 + (line_height_source * len(source_lines))
-
-        max_line_widths = []
-        if title_lines:
+            cv2.rectangle(frame, (box_x, box_y), (box_x + box_w, box_y + title_h), BAR_COLOR, -1)
+            y += 8
             for line in title_lines:
-                max_line_widths.append(cv2.getTextSize(line, font, font_scale_title, thickness)[0][0])
-        for line in quote_lines:
-            if line:
-                max_line_widths.append(cv2.getTextSize(line, font, font_scale_quote, thickness)[0][0])
-        if source_lines:
-            for line in source_lines:
-                max_line_widths.append(cv2.getTextSize(line, font, font_scale_source, thickness)[0][0])
+                y += adv_title
+                put_text(frame, line, (w - text_size(line, s_title)[0]) // 2, y - 6, s_title, title_color)
+            y = box_y + title_h
 
-        calculated_width = max(max_line_widths) if max_line_widths else 200
-        box_width = max(calculated_width + 40, MIN_BOX_WIDTH)
-        box_height = text_height + 80
-        box_x = (frame.shape[1] - box_width) // 2
-        box_y = (frame.shape[0] - box_height) // 2
-
-        overlay_frame = frame.copy()
-        cv2.rectangle(overlay_frame, (box_x, box_y),
-                      (box_x + box_width, box_y + box_height), box_color, -1)
-        alpha = 0.8
-        cv2.addWeighted(overlay_frame, alpha, frame, 1 - alpha, 0, overlay_frame)
-
-        if title_lines:
-            title_bar_y_end = box_y + title_height
-            cv2.rectangle(overlay_frame, (box_x, box_y),
-                          (box_x + box_width, title_bar_y_end), title_bar_color, -1)
-
-        title_line_sizes = []
-        for line in title_lines:
-            text_size, _ = cv2.getTextSize(line, font, font_scale_title, thickness)
-            title_line_sizes.append(text_size)
-
-        if title_lines:
-            total_title_text_height = sum(t[1] for t in title_line_sizes) + (
-                (len(title_lines) - 1) * 10
-            )
-            available_space = title_height - 20
-            vertical_offset = (available_space - total_title_text_height) // 2
-            y = box_y + 10 + vertical_offset
-        else:
-            y = box_y + 20
-
-        for i, line in enumerate(title_lines):
-            text_size = title_line_sizes[i]
-            line_height = text_size[1]
-            x = (frame.shape[1] - text_size[0]) // 2
-            cv2.putText(overlay_frame, line, (x, y + line_height),
-                        font, font_scale_title, font_color_title, thickness, cv2.LINE_AA)
-            y += line_height
-            if i < len(title_lines) - 1:
-                y += 10
-
-        if title_lines:
-            y = box_y + title_height
         y += 20
-
         for line in quote_lines:
-            text_size, _ = cv2.getTextSize(line, font, font_scale_quote, thickness)
-            x = (frame.shape[1] - text_size[0]) // 2
-            cv2.putText(overlay_frame, line, (x, y + text_size[1]),
-                        font, font_scale_quote, font_color, thickness, cv2.LINE_AA)
-            y += text_size[1] + 10
+            y += adv_quote
+            if line:
+                put_text(frame, line, (w - text_size(line, s_quote)[0]) // 2, y - 6, s_quote, text_color)
 
         if source_lines:
-            y += 10
+            y += 12
             for line in source_lines:
-                text_size, _ = cv2.getTextSize(line, font, font_scale_source, thickness)
-                x = (frame.shape[1] - text_size[0]) // 2
-                cv2.putText(overlay_frame, line, (x, y + text_size[1]),
-                            font, font_scale_source, font_color, thickness, cv2.LINE_AA)
-                y += text_size[1] + 10
-
-        return overlay_frame
-    except Exception as e:
-        print(f"Error adding quote overlay: {e}")
+                y += adv_source
+                put_text(frame, line, (w - text_size(line, s_source)[0]) // 2, y - 6, s_source, text_color)
+        return frame
+    except Exception as exc:
+        print(f"Error adding quote overlay: {exc}")
         return frame

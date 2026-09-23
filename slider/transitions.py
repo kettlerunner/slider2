@@ -1,6 +1,12 @@
-"""Slide transition effects — basic and advanced.
+"""Slide transitions.
 
-All transition generators yield frames blending current_img into next_img.
+Each transition is a factory: ``render = transition(current, next_)`` does the
+per-pair precomputation once and returns ``render(alpha)`` which produces the
+frame for progress ``alpha`` in [0, 1]. The slideshow drives ``alpha`` from the
+wall clock, so a transition always lasts exactly TRANSITION_TIME no matter how
+fast the hardware is. All heavy lifting is in OpenCV (remap, addWeighted,
+blendLinear); no per-pixel Python and no per-frame float conversions of whole
+frames.
 """
 
 import math
@@ -8,304 +14,257 @@ import math
 import cv2
 import numpy as np
 
-from slider.image_processing import ensure_same_channels
+from slider.image_processing import to_bgr
 
 
-def _transition_alphas(num_frames):
-    """Generate alpha values from 0 to 1 over num_frames."""
-    if num_frames <= 1:
-        return [1.0]
-    return np.linspace(0, 1, num_frames, endpoint=True)
+def prepare(current_img, next_img):
+    """Return both images as BGR uint8 with identical shapes (next is resized to current)."""
+    current_img = to_bgr(current_img)
+    next_img = to_bgr(next_img)
+    if current_img.dtype != np.uint8:
+        current_img = np.clip(current_img, 0, 255).astype(np.uint8)
+    if next_img.dtype != np.uint8:
+        next_img = np.clip(next_img, 0, 255).astype(np.uint8)
+    if next_img.shape[:2] != current_img.shape[:2]:
+        h, w = current_img.shape[:2]
+        next_img = cv2.resize(next_img, (w, h), interpolation=cv2.INTER_AREA)
+    return np.ascontiguousarray(current_img), np.ascontiguousarray(next_img)
+
+
+def _clamp(alpha):
+    return 0.0 if alpha < 0.0 else 1.0 if alpha > 1.0 else float(alpha)
+
+
+def _smoothstep(t):
+    return t * t * (3.0 - 2.0 * t)
 
 
 # ---------------------------------------------------------------------------
 # Basic transitions
 # ---------------------------------------------------------------------------
 
-def fade_transition(current_img, next_img, num_frames):
-    current_img, next_img = ensure_same_channels(current_img, next_img)
-    if current_img is None or next_img is None:
-        return
-    for alpha in _transition_alphas(num_frames):
-        blended = cv2.addWeighted(current_img, 1 - alpha, next_img, alpha, 0)
-        yield blended
+def fade(current_img, next_img):
+    cur, nxt = prepare(current_img, next_img)
+
+    def render(alpha):
+        alpha = _clamp(alpha)
+        return cv2.addWeighted(cur, 1.0 - alpha, nxt, alpha, 0.0)
+
+    return render
 
 
-def slide_transition_left(current_img, next_img, num_frames):
-    current_img, next_img = ensure_same_channels(current_img, next_img)
-    if current_img is None or next_img is None:
-        return
-    height, width = current_img.shape[:2]
-    for alpha in _transition_alphas(num_frames):
-        dx = int(width * alpha)
-        frame = np.zeros_like(current_img)
-        if dx < width:
-            frame[:, :width - dx] = current_img[:, dx:]
+def slide_left(current_img, next_img):
+    cur, nxt = prepare(current_img, next_img)
+    w = cur.shape[1]
+
+    def render(alpha):
+        dx = int(round(w * _clamp(alpha)))
+        frame = np.empty_like(cur)
+        if dx < w:
+            frame[:, :w - dx] = cur[:, dx:]
         if dx > 0:
-            frame[:, width - dx:] = next_img[:, :dx]
-        yield frame
+            frame[:, w - dx:] = nxt[:, :dx]
+        return frame
+
+    return render
 
 
-def slide_transition_right(current_img, next_img, num_frames):
-    current_img, next_img = ensure_same_channels(current_img, next_img)
-    if current_img is None or next_img is None:
-        return
-    height, width = current_img.shape[:2]
-    for alpha in _transition_alphas(num_frames):
-        dx = int(width * alpha)
-        frame = np.zeros_like(current_img)
-        if dx < width:
-            frame[:, dx:] = current_img[:, :width - dx]
+def slide_right(current_img, next_img):
+    cur, nxt = prepare(current_img, next_img)
+    w = cur.shape[1]
+
+    def render(alpha):
+        dx = int(round(w * _clamp(alpha)))
+        frame = np.empty_like(cur)
+        if dx < w:
+            frame[:, dx:] = cur[:, :w - dx]
         if dx > 0:
-            frame[:, :dx] = next_img[:, width - dx:]
-        yield frame
+            frame[:, :dx] = nxt[:, w - dx:]
+        return frame
+
+    return render
 
 
-def wipe_transition_top(current_img, next_img, num_frames):
-    current_img, next_img = ensure_same_channels(current_img, next_img)
-    if current_img is None or next_img is None:
-        return
-    height, width = current_img.shape[:2]
-    for alpha in _transition_alphas(num_frames):
-        dy = int(height * alpha)
-        frame = np.zeros_like(current_img)
-        if dy < height:
-            frame[:height - dy, :] = current_img[dy:, :]
+def wipe_top(current_img, next_img):
+    cur, nxt = prepare(current_img, next_img)
+    h = cur.shape[0]
+
+    def render(alpha):
+        dy = int(round(h * _clamp(alpha)))
+        frame = np.empty_like(cur)
+        if dy < h:
+            frame[:h - dy] = cur[dy:]
         if dy > 0:
-            frame[height - dy:, :] = next_img[:dy, :]
-        yield frame
+            frame[h - dy:] = nxt[:dy]
+        return frame
+
+    return render
 
 
-def wipe_transition_bottom(current_img, next_img, num_frames):
-    current_img, next_img = ensure_same_channels(current_img, next_img)
-    if current_img is None or next_img is None:
-        return
-    height, width = current_img.shape[:2]
-    for alpha in _transition_alphas(num_frames):
-        dy = int(height * alpha)
-        frame = np.zeros_like(current_img)
-        if dy < height:
-            frame[dy:, :] = current_img[:height - dy, :]
+def wipe_bottom(current_img, next_img):
+    cur, nxt = prepare(current_img, next_img)
+    h = cur.shape[0]
+
+    def render(alpha):
+        dy = int(round(h * _clamp(alpha)))
+        frame = np.empty_like(cur)
+        if dy < h:
+            frame[dy:] = cur[:h - dy]
         if dy > 0:
-            frame[:dy, :] = next_img[height - dy:, :]
-        yield frame
+            frame[:dy] = nxt[h - dy:]
+        return frame
+
+    return render
 
 
 # ---------------------------------------------------------------------------
-# Advanced transitions (vectorized for Pi performance)
+# Advanced transitions
 # ---------------------------------------------------------------------------
 
-def melt_transition(current_img, next_img, num_frames):
-    """Rows of current image slide downward, revealing next image beneath.
+def melt(current_img, next_img):
+    """The current image slides downward while fading, revealing the next."""
+    cur, nxt = prepare(current_img, next_img)
+    h = cur.shape[0]
+    max_shift = h // 2
 
-    Optimized: uses np.roll + vectorized blending instead of per-row Python loop.
-    """
-    current_img, next_img = ensure_same_channels(current_img, next_img)
-    if current_img is None or next_img is None:
-        return
-
-    height = current_img.shape[0]
-    max_shift = int(height * 0.5)
-
-    curr_f = current_img.astype(np.float32)
-    next_f = next_img.astype(np.float32)
-
-    for alpha in _transition_alphas(num_frames):
+    def render(alpha):
+        alpha = _clamp(alpha)
         shift = int(alpha * max_shift)
-        row_alpha = 1.0 - alpha
-
-        # Shift current image down by 'shift' rows
-        shifted = np.roll(curr_f, shift, axis=0)
-        # Top rows that wrapped around should be transparent (use next_img)
-        if shift > 0:
-            shifted[:shift, :, :] = next_f[:shift, :, :]
-
-        # Blend shifted current over next
-        frame = next_f * (1.0 - row_alpha) + shifted * row_alpha
-        yield np.clip(frame, 0, 255).astype(np.uint8)
-
-
-def wave_transition(current_img, next_img, num_frames):
-    """Current image distorts with a wave effect, revealing next image.
-
-    Optimized: uses cv2.remap instead of per-row Python loop.
-    """
-    current_img, next_img = ensure_same_channels(current_img, next_img)
-    if current_img is None or next_img is None:
-        return
-
-    height, width = current_img.shape[:2]
-    max_vertical_shift = int(height * 0.4)
-    max_horizontal_shift = int(width * 0.02)
-
-    # Precompute coordinate grids
-    ys, xs = np.mgrid[0:height, 0:width].astype(np.float32)
-    row_phases_v = (np.arange(height, dtype=np.float32) / float(height)) * 2 * np.pi
-    row_phases_h = (np.arange(height, dtype=np.float32) / float(height)) * 4 * np.pi
-
-    curr_f = current_img.astype(np.float32)
-    next_f = next_img.astype(np.float32)
-
-    for alpha in _transition_alphas(num_frames):
-        row_alpha = 1.0 - alpha
-
-        # Compute vertical displacement per row
-        v_shift = np.sin(row_phases_v + alpha * 2 * np.pi) * max_vertical_shift * alpha
-        h_shift = np.sin(row_phases_h + alpha * 4 * np.pi) * max_horizontal_shift * alpha
-
-        # Build displacement maps (broadcast row shifts to full grid)
-        map_y = ys + v_shift[:, np.newaxis]
-        map_x = xs + h_shift[:, np.newaxis]
-
-        # Remap current image through the distortion
-        warped = cv2.remap(
-            current_img, map_x, map_y,
-            interpolation=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_REFLECT,
-        ).astype(np.float32)
-
-        # Blend warped current over next
-        frame = next_f * (1.0 - row_alpha) + warped * row_alpha
-        yield np.clip(frame, 0, 255).astype(np.uint8)
-
-
-def zen_ripple_transition(current_img, next_img, num_frames):
-    """Circular ripple expanding from center, revealing next image."""
-    current_img, next_img = ensure_same_channels(current_img, next_img)
-    if current_img is None or next_img is None:
-        return
-
-    height, width = current_img.shape[:2]
-    center_x, center_y = width // 2, height // 2
-    max_radius = np.sqrt((width / 2.0) ** 2 + (height / 2.0) ** 2)
-
-    def smoothstep(t):
-        return 3 * t ** 2 - 2 * t ** 3
-
-    ys, xs = np.indices((height, width))
-    distances = np.sqrt((xs - center_x) ** 2 + (ys - center_y) ** 2)
-
-    for alpha in _transition_alphas(num_frames):
-        radius = alpha * max_radius
-        blend_region = 10
-        lower_bound = radius - blend_region
-        upper_bound = radius + blend_region
-
-        curr = current_img.astype(np.float32)
-        nxt = next_img.astype(np.float32)
         frame = nxt.copy()
+        if shift < h:
+            blended = cv2.addWeighted(cur[:h - shift], 1.0 - alpha, nxt[shift:], alpha, 0.0)
+            frame[shift:] = blended
+        return frame
 
-        factor = np.zeros_like(distances, dtype=np.float32)
-        inside = distances < lower_bound
-        outside = distances > upper_bound
-        blend_zone = ~inside & ~outside
-
-        factor[inside] = 1.0
-        if np.any(blend_zone):
-            blend_zone_dist = (distances[blend_zone] - lower_bound) / (upper_bound - lower_bound)
-            blend_zone_factor = 1.0 - blend_zone_dist
-            blend_zone_factor = smoothstep(blend_zone_factor)
-            factor[blend_zone] = blend_zone_factor
-        factor[outside] = 0.0
-
-        factor_3c = factor[:, :, np.newaxis]
-        blended = curr * (1 - factor_3c) + nxt * factor_3c
-        yield blended.astype(np.uint8)
+    return render
 
 
-def dynamic_petal_bloom_transition(current_img, next_img, num_frames):
-    """Radial petal-shaped burst revealing the next image."""
-    current_img, next_img = ensure_same_channels(current_img, next_img)
-    if current_img is None or next_img is None:
-        return
+def wave(current_img, next_img):
+    """The current image ripples with a sine distortion while fading out."""
+    cur, nxt = prepare(current_img, next_img)
+    h, w = cur.shape[:2]
+    max_vertical = h * 0.4
+    max_horizontal = w * 0.02
 
-    height, width = current_img.shape[:2]
-    center_x, center_y = width / 2.0, height / 2.0
+    ys, xs = np.indices((h, w), dtype=np.float32)
+    rows = np.arange(h, dtype=np.float32) / float(h)
+    phase_v = rows * (2.0 * np.pi)
+    phase_h = rows * (4.0 * np.pi)
 
-    N = 8
+    def render(alpha):
+        alpha = _clamp(alpha)
+        v_shift = np.sin(phase_v + alpha * 2.0 * np.pi) * (max_vertical * alpha)
+        h_shift = np.sin(phase_h + alpha * 4.0 * np.pi) * (max_horizontal * alpha)
+        map_y = ys + v_shift[:, np.newaxis].astype(np.float32)
+        map_x = xs + h_shift[:, np.newaxis].astype(np.float32)
+        warped = cv2.remap(cur, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+        return cv2.addWeighted(warped, 1.0 - alpha, nxt, alpha, 0.0)
+
+    return render
+
+
+def ripple(current_img, next_img):
+    """A soft-edged circle grows from the center, revealing the next image."""
+    cur, nxt = prepare(current_img, next_img)
+    h, w = cur.shape[:2]
+    ys, xs = np.indices((h, w), dtype=np.float32)
+    distance = np.sqrt((xs - w / 2.0) ** 2 + (ys - h / 2.0) ** 2).astype(np.float32)
+    max_radius = math.hypot(w / 2.0, h / 2.0)
+    band = 10.0
+
+    def render(alpha):
+        # Sweep the soft band from fully outside the frame (alpha 0) to fully
+        # past the corners (alpha 1) so the endpoints are exactly cur and nxt.
+        radius = _clamp(alpha) * (max_radius + 2.0 * band) - band
+        weight_next = (radius + band - distance) * (1.0 / (2.0 * band))
+        np.clip(weight_next, 0.0, 1.0, out=weight_next)
+        weight_next = _smoothstep(weight_next)
+        return cv2.blendLinear(nxt, cur, weight_next, 1.0 - weight_next)
+
+    return render
+
+
+def petal_bloom(current_img, next_img):
+    """The current image splits into eight petals that rotate and scale away."""
+    cur, nxt = prepare(current_img, next_img)
+    h, w = cur.shape[:2]
+    cx, cy = w / 2.0, h / 2.0
+    petals = 8
     max_rotation = math.radians(30)
     scale_factor = 0.3
-    inward_factor = 0.2
     blend_boundary = math.radians(2)
 
-    def smoothstep(t):
-        return 3 * t ** 2 - 2 * t ** 3
-
-    ys, xs = np.indices((height, width))
-    dx = xs - center_x
-    dy = ys - center_y
-    radius = np.sqrt(dx * dx + dy * dy)
+    ys, xs = np.indices((h, w), dtype=np.float32)
+    dx = xs - cx
+    dy = ys - cy
     angle = np.arctan2(dy, dx)
-    angle_norm = (angle + 2 * math.pi) % (2 * math.pi)
+    angle_norm = np.mod(angle + 2.0 * math.pi, 2.0 * math.pi)
+    petal_angle = 2.0 * math.pi / petals
+    petal_center = np.floor(angle_norm / petal_angle) * petal_angle + petal_angle / 2.0
+    angle_diff = np.mod(angle_norm - petal_center + math.pi, 2.0 * math.pi) - math.pi
+    half_sign = np.where(angle_diff > 0, 1.0, -1.0).astype(np.float32)
 
-    petal_angle = 2 * math.pi / N
-    petal_index = (angle_norm // petal_angle).astype(np.int32)
+    boundary_dist = np.abs(angle_diff) - (petal_angle / 2.0 - blend_boundary)
+    edge = np.clip(boundary_dist / blend_boundary, 0.0, 1.0)
+    boundary_mask = np.where(boundary_dist > 0, _smoothstep(1.0 - edge), 1.0).astype(np.float32)
+    ones = np.ones((h, w), dtype=np.float32)
 
-    petal_center_angle = petal_index * petal_angle + petal_angle / 2.0
-    angle_diff = angle_norm - petal_center_angle
-    angle_diff = (angle_diff + math.pi) % (2 * math.pi) - math.pi
-
-    for alpha in _transition_alphas(num_frames):
-        frame = next_img.copy().astype(np.float32)
-
-        radius_factor = 1 - inward_factor + alpha * (inward_factor + scale_factor)
-        wave = (math.cos(math.pi * (1 - alpha)) + 1) / 2.0
-        adjusted_radius_factor = radius_factor * (0.9 + 0.1 * wave)
-
+    def render(alpha):
+        alpha = _clamp(alpha)
+        # Petals grow outward (source coordinates shrink) as they rotate and fade.
+        k = 1.0 / (1.0 + alpha * scale_factor)
         rot = alpha * max_rotation
-        top_half = angle_diff > 0
-        half_sign = np.ones_like(angle_diff, dtype=np.float32)
-        half_sign[~top_half] = -1.0
-        new_angle = angle + half_sign * rot
-        new_radius = radius * adjusted_radius_factor
+        c, s = math.cos(rot), math.sin(rot)
+        hs = half_sign * s
+        # Rotate each petal about the center by +/- rot and scale by k, using
+        # cos(a+r) = cos a cos r - sin a sin r with radius*cos a = dx, radius*sin a = dy.
+        map_x = (k * (dx * c - dy * hs) + cx).astype(np.float32)
+        map_y = (k * (dy * c + dx * hs) + cy).astype(np.float32)
+        warped = cv2.remap(cur, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+        inside = cv2.remap(ones, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+        # Seams between petals open up gradually (no gaps at alpha 0).
+        seams = 1.0 - alpha * (1.0 - boundary_mask)
+        weight_cur = inside * seams * (1.0 - alpha)
+        return cv2.blendLinear(warped, nxt, weight_cur, 1.0 - weight_cur)
 
-        half_petal = petal_angle / 2.0
-        boundary_dist = np.abs(angle_diff) - (half_petal - blend_boundary)
-        boundary_mask = np.ones_like(angle_diff, dtype=np.float32)
-        in_blend_zone = boundary_dist > 0
-        if np.any(in_blend_zone):
-            blend_norm = boundary_dist[in_blend_zone] / blend_boundary
-            blend_norm = np.clip(blend_norm, 0, 1)
-            blend_val = smoothstep(1 - blend_norm)
-            boundary_mask[in_blend_zone] = blend_val
-
-        src_x = (new_radius * np.cos(new_angle) + center_x).astype(np.float32)
-        src_y = (new_radius * np.sin(new_angle) + center_y).astype(np.float32)
-
-        inside = (src_x >= 0) & (src_x < width) & (src_y >= 0) & (src_y < height)
-
-        src_xi = np.clip(np.round(src_x[inside]).astype(np.int32), 0, width - 1)
-        src_yi = np.clip(np.round(src_y[inside]).astype(np.int32), 0, height - 1)
-
-        old_pixels = current_img[src_yi, src_xi].astype(np.float32)
-        factor = (1 - alpha)
-        bm = boundary_mask[inside, np.newaxis]
-        final_factor = factor * bm
-
-        base = frame[inside, :3]
-        blended_rgb = base * (1 - final_factor) + old_pixels[:, :3] * final_factor
-        frame[inside, :3] = blended_rgb
-
-        yield frame.astype(np.uint8)
+    return render
 
 
 # ---------------------------------------------------------------------------
-# Transition sets for mode selection
+# Transition sets and helpers
 # ---------------------------------------------------------------------------
 
-BASIC_TRANSITIONS = [
-    fade_transition,
-    slide_transition_left,
-    slide_transition_right,
-    wipe_transition_top,
-    wipe_transition_bottom,
-]
-
-ADVANCED_TRANSITIONS = [
-    melt_transition,
-    wave_transition,
-    zen_ripple_transition,
-    dynamic_petal_bloom_transition,
-]
-
+BASIC_TRANSITIONS = [fade, slide_left, slide_right, wipe_top, wipe_bottom]
+ADVANCED_TRANSITIONS = [melt, wave, ripple, petal_bloom]
 ALL_TRANSITIONS = BASIC_TRANSITIONS + ADVANCED_TRANSITIONS
+# Cheap enough for a Raspberry Pi at full frame rate.
+LOW_POWER_TRANSITIONS = BASIC_TRANSITIONS + [melt, wave]
+
+
+def iter_frames(transition, current_img, next_img, num_frames):
+    """Yield num_frames frames of a transition at evenly spaced alphas (0 -> 1)."""
+    render = transition(current_img, next_img)
+    if num_frames <= 1:
+        yield render(1.0)
+        return
+    for alpha in np.linspace(0.0, 1.0, num_frames):
+        yield render(float(alpha))
+
+
+# Generator-style aliases (current, next, num_frames) kept for compatibility.
+def _generator_alias(transition):
+    def alias(current_img, next_img, num_frames):
+        return iter_frames(transition, current_img, next_img, num_frames)
+    alias.__name__ = f"{transition.__name__}_transition"
+    return alias
+
+
+fade_transition = _generator_alias(fade)
+slide_transition_left = _generator_alias(slide_left)
+slide_transition_right = _generator_alias(slide_right)
+wipe_transition_top = _generator_alias(wipe_top)
+wipe_transition_bottom = _generator_alias(wipe_bottom)
+melt_transition = _generator_alias(melt)
+wave_transition = _generator_alias(wave)
+zen_ripple_transition = _generator_alias(ripple)
+dynamic_petal_bloom_transition = _generator_alias(petal_bloom)

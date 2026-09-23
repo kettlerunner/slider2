@@ -1,227 +1,314 @@
-"""Image resizing, background blurring, stitching, and frame normalization."""
+"""Image loading, scaling, backgrounds, collages, and frame normalization.
+
+Every builder returns a BGR uint8 frame of exactly (height, width) so the
+transitions and overlays never need to convert or resize.
+"""
 
 import math
+import os
 import random
+from collections import OrderedDict
 
 import cv2
 import numpy as np
 
 from slider import config
 
+_ALPHA_SOURCE_EXTENSIONS = (".png", ".webp", ".gif")
 
-def normalize_frame_for_display(frame, enforce_size=True):
-    """Normalize frame data so every render is consistent for fullscreen playback."""
-    if frame is None:
+
+# ---------------------------------------------------------------------------
+# Loading
+# ---------------------------------------------------------------------------
+
+def _read_first_video_frame(path):
+    cap = cv2.VideoCapture(path)
+    try:
+        if not cap.isOpened():
+            return None
+        ok, frame = cap.read()
+        return frame if ok else None
+    finally:
+        cap.release()
+
+
+def read_image(path):
+    """Read an image as BGR or BGRA uint8, honoring EXIF orientation. None on failure."""
+    ext = os.path.splitext(path)[1].lower()
+    # IMREAD_UNCHANGED keeps alpha but ignores EXIF orientation, so only use it
+    # for formats that can carry transparency.
+    flags = cv2.IMREAD_UNCHANGED if ext in _ALPHA_SOURCE_EXTENSIONS else cv2.IMREAD_COLOR
+    img = cv2.imread(path, flags)
+    if img is None and ext in (".gif", ".webp"):
+        img = _read_first_video_frame(path)
+    if img is None or img.size == 0:
         return None
 
-    normalized = frame
+    if img.dtype == np.uint16:
+        img = (img >> 8).astype(np.uint8)
+    elif img.dtype != np.uint8:
+        img = np.clip(img, 0, 255).astype(np.uint8)
 
-    if not isinstance(normalized, np.ndarray):
-        return None
-
-    if normalized.dtype != np.uint8:
-        normalized = np.clip(normalized, 0, 255).astype(np.uint8)
-
-    if normalized.ndim == 2:
-        normalized = cv2.cvtColor(normalized, cv2.COLOR_GRAY2BGR)
-    elif normalized.ndim == 3:
-        channels = normalized.shape[2]
-        if channels == 1:
-            normalized = cv2.cvtColor(normalized, cv2.COLOR_GRAY2BGR)
-        elif channels == 4:
-            normalized = cv2.cvtColor(normalized, cv2.COLOR_BGRA2BGR)
-
-    if enforce_size and (
-        normalized.shape[0] != config.FRAME_HEIGHT or normalized.shape[1] != config.FRAME_WIDTH
-    ):
-        normalized = cv2.resize(
-            normalized, (config.FRAME_WIDTH, config.FRAME_HEIGHT),
-            interpolation=cv2.INTER_AREA,
-        )
-
-    return np.ascontiguousarray(normalized)
-
-
-def resize_and_pad(image, width, height):
-    """Resize an image to fit in (width, height) with black padding."""
-    if image is None:
-        return None
-
-    img = image
     if img.ndim == 2:
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-    elif img.ndim == 3 and img.shape[2] == 1:
+    elif img.shape[2] == 1:
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    elif img.shape[2] > 4:
+        img = np.ascontiguousarray(img[:, :, :4])
+    return img
 
-    h, w = img.shape[:2]
-    if h == 0 or w == 0:
+
+def downscale_to(image, max_dim):
+    """Shrink so the longest edge is at most max_dim (never upscales)."""
+    h, w = image.shape[:2]
+    longest = max(h, w)
+    if longest <= max_dim:
+        return image
+    scale = max_dim / float(longest)
+    new_size = (max(1, int(round(w * scale))), max(1, int(round(h * scale))))
+    return cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
+
+
+def load_image(path, max_dim=None):
+    """Read an image and cap its longest edge (default: config.IMAGE_MAX_DIM)."""
+    img = read_image(path)
+    if img is None:
+        print(f"Failed to read image: {path}")
+        return None
+    return downscale_to(img, max_dim or config.IMAGE_MAX_DIM)
+
+
+class ImageCache:
+    """Small LRU cache of decoded images keyed by path."""
+
+    def __init__(self, capacity=None):
+        self.capacity = capacity or config.MAX_IMAGE_CACHE
+        self._items = OrderedDict()
+
+    def get(self, path):
+        img = self._items.get(path)
+        if img is not None:
+            self._items.move_to_end(path)
+            return img
+        img = load_image(path)
+        if img is None:
+            return None
+        self._items[path] = img
+        while len(self._items) > self.capacity:
+            self._items.popitem(last=False)
+        return img
+
+    def invalidate(self, path):
+        self._items.pop(path, None)
+
+    def clear(self):
+        self._items.clear()
+
+
+# ---------------------------------------------------------------------------
+# Pre-scaled display copies (built once, in the background)
+# ---------------------------------------------------------------------------
+
+def scaled_path_for(src_path, dst_dir=None):
+    """Where the display-sized copy of src_path lives."""
+    dst_dir = dst_dir or config.SCALED_DIR
+    name, ext = os.path.splitext(os.path.basename(src_path))
+    out_ext = ".png" if ext.lower() in _ALPHA_SOURCE_EXTENSIONS else ".jpg"
+    return os.path.join(dst_dir, name + out_ext)
+
+
+def prepare_display_copy(src_path, dst_dir=None, max_dim=None):
+    """Create (or reuse) a display-sized copy of an image. Returns its path or None.
+
+    Decoding a 12-megapixel JPEG on a Pi takes hundreds of milliseconds; doing
+    it once here keeps the render loop's loads to a few milliseconds each.
+    """
+    dst_path = scaled_path_for(src_path, dst_dir)
+    try:
+        src_mtime = os.path.getmtime(src_path)
+        if os.path.isfile(dst_path) and os.path.getmtime(dst_path) >= src_mtime:
+            return dst_path
+    except OSError:
         return None
 
-    scale = min(width / float(w), height / float(h))
-    new_w, new_h = int(w * scale), int(h * scale)
-    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    img = read_image(src_path)
+    if img is None:
+        return None
+    img = downscale_to(img, max_dim or config.IMAGE_MAX_DIM)
 
-    channels = resized.shape[2] if resized.ndim == 3 else 3
-    if channels == 4:
-        padded = np.zeros((height, width, 4), dtype=np.uint8)
-    else:
-        padded = np.zeros((height, width, 3), dtype=np.uint8)
-
-    top_pad = (height - resized.shape[0]) // 2
-    left_pad = (width - resized.shape[1]) // 2
-    padded[top_pad:top_pad + resized.shape[0], left_pad:left_pad + resized.shape[1]] = resized
-    return padded
-
-
-def create_zoomed_blurred_background(image, width, height):
-    """Create a zoomed and blurred version of an image as a background."""
-    img = image.copy()
-    h, w = img.shape[:2]
-    if h == 0 or w == 0:
-        return np.zeros((height, width, 3), dtype=np.uint8)
-
-    scale = max(width / float(w), height / float(h)) * 1.1
-    new_w, new_h = int(w * scale), int(h * scale)
-    zoomed = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-
-    start_x = max((zoomed.shape[1] - width) // 2, 0)
-    start_y = max((zoomed.shape[0] - height) // 2, 0)
-    cropped = zoomed[start_y:start_y + height, start_x:start_x + width]
-
-    blurred = cv2.GaussianBlur(cropped, (31, 31), 0)
-    return blurred
+    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+    tmp_path = dst_path + ".tmp" + os.path.splitext(dst_path)[1]
+    params = [cv2.IMWRITE_JPEG_QUALITY, 90] if dst_path.lower().endswith(".jpg") else []
+    try:
+        if not cv2.imwrite(tmp_path, img, params):
+            raise OSError("imwrite failed")
+        os.replace(tmp_path, dst_path)
+    except (OSError, cv2.error) as exc:
+        print(f"Failed to write display copy for {os.path.basename(src_path)}: {exc}")
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        return None
+    return dst_path
 
 
-def ensure_same_channels(img1, img2):
-    """Ensure both images have the same number of channels."""
-    if img1 is None or img2 is None:
-        return img1, img2
-
-    if img1.ndim == 2:
-        img1 = cv2.cvtColor(img1, cv2.COLOR_GRAY2BGR)
-    if img2.ndim == 2:
-        img2 = cv2.cvtColor(img2, cv2.COLOR_GRAY2BGR)
-
-    if img1.ndim == 3 and img2.ndim == 3 and img1.shape[2] != img2.shape[2]:
-        if img1.shape[2] == 3 and img2.shape[2] == 4:
-            img1 = cv2.cvtColor(img1, cv2.COLOR_BGR2BGRA)
-        elif img1.shape[2] == 4 and img2.shape[2] == 3:
-            img2 = cv2.cvtColor(img2, cv2.COLOR_BGR2BGRA)
-
-    return img1, img2
+def prune_display_copies(valid_sources, dst_dir=None):
+    """Delete display copies whose source is gone."""
+    dst_dir = dst_dir or config.SCALED_DIR
+    if not os.path.isdir(dst_dir):
+        return
+    keep = {os.path.basename(scaled_path_for(p, dst_dir)) for p in valid_sources}
+    for entry in os.listdir(dst_dir):
+        if entry in keep:
+            continue
+        try:
+            os.remove(os.path.join(dst_dir, entry))
+        except OSError:
+            pass
 
 
-def _to_bgr(image):
-    """Convert an image to 3-channel BGR."""
+# ---------------------------------------------------------------------------
+# Geometry helpers
+# ---------------------------------------------------------------------------
+
+def to_bgr(image):
+    """Convert an image to 3-channel BGR (no copy when already BGR)."""
     if image.ndim == 2:
         return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-    if image.ndim == 3 and image.shape[2] == 4:
+    if image.shape[2] == 4:
         return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+    if image.shape[2] == 1:
+        return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
     return image
 
 
-def stitch_images(images, width, height):
-    """Build a multi-photo collage on top of a zoomed, blurred background."""
+def resize_to_fit(image, box_w, box_h):
+    """Scale to fit inside box_w x box_h, preserving aspect ratio."""
+    h, w = image.shape[:2]
+    scale = min(box_w / float(w), box_h / float(h))
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+    if new_w == w and new_h == h:
+        return image
+    interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+    return cv2.resize(image, (new_w, new_h), interpolation=interpolation)
+
+
+def paste(background, image, top, left):
+    """Paste image (BGR or BGRA) onto background in place, clipping to bounds."""
+    bh, bw = background.shape[:2]
+    h, w = image.shape[:2]
+    y0, x0 = max(0, top), max(0, left)
+    y1, x1 = min(bh, top + h), min(bw, left + w)
+    if y1 <= y0 or x1 <= x0:
+        return background
+    src = image[y0 - top:y1 - top, x0 - left:x1 - left]
+    roi = background[y0:y1, x0:x1]
+
+    if src.ndim == 3 and src.shape[2] == 4:
+        alpha = src[:, :, 3:4].astype(np.float32) * (1.0 / 255.0)
+        rgb = src[:, :, :3].astype(np.float32)
+        blended = roi.astype(np.float32) * (1.0 - alpha) + rgb * alpha
+        roi[:] = blended.astype(np.uint8)
+    else:
+        roi[:] = src if src.ndim == 3 else cv2.cvtColor(src, cv2.COLOR_GRAY2BGR)
+    return background
+
+
+def resize_and_pad(image, width, height):
+    """Fit an image inside (width, height) on black. Returns a BGR frame."""
+    if image is None:
+        return None
+    img = to_bgr(image)
+    h, w = img.shape[:2]
+    if h == 0 or w == 0:
+        return None
+    resized = resize_to_fit(img, width, height)
+    padded = np.zeros((height, width, 3), dtype=np.uint8)
+    top = (height - resized.shape[0]) // 2
+    left = (width - resized.shape[1]) // 2
+    padded[top:top + resized.shape[0], left:left + resized.shape[1]] = resized
+    return padded
+
+
+def create_zoomed_blurred_background(image, width, height, zoom=1.1):
+    """A cover-cropped, zoomed, heavily blurred copy of the image as a backdrop.
+
+    The blur happens at quarter resolution and is scaled back up, which looks
+    identical for a background but costs a fraction of a full-size blur.
+    """
+    if image is None or image.size == 0:
+        return np.zeros((height, width, 3), dtype=np.uint8)
+    img = to_bgr(image)
+    h, w = img.shape[:2]
+
+    # Region of the source that covers the frame after zooming.
+    cover = max(width / float(w), height / float(h)) * zoom
+    region_w = max(1, min(w, int(round(width / cover))))
+    region_h = max(1, min(h, int(round(height / cover))))
+    x0 = (w - region_w) // 2
+    y0 = (h - region_h) // 2
+    crop = img[y0:y0 + region_h, x0:x0 + region_w]
+
+    small_w, small_h = max(8, width // 4), max(8, height // 4)
+    small = cv2.resize(crop, (small_w, small_h), interpolation=cv2.INTER_AREA)
+    small = cv2.GaussianBlur(small, (0, 0), 4)
+    return cv2.resize(small, (width, height), interpolation=cv2.INTER_LINEAR)
+
+
+# ---------------------------------------------------------------------------
+# Frame builders
+# ---------------------------------------------------------------------------
+
+def create_single_image_with_background(image, width, height, margin=0.9):
+    """Center the image on a blurred backdrop of itself."""
+    if image is None or image.size == 0:
+        return np.zeros((height, width, 3), dtype=np.uint8)
+    background = create_zoomed_blurred_background(image, width, height)
+    fitted = resize_to_fit(image, int(width * margin), int(height * margin))
+    top = (height - fitted.shape[0]) // 2
+    left = (width - fitted.shape[1]) // 2
+    return paste(background, fitted, top, left)
+
+
+def stitch_images(images, width, height, margin=0.9):
+    """Lay several images out in a grid over a blurred backdrop."""
+    images = [img for img in images if img is not None and img.size]
     if not images:
         return np.zeros((height, width, 3), dtype=np.uint8)
 
-    bg_src = random.choice(images)
-    if bg_src is None or bg_src.size == 0:
-        return np.zeros((height, width, 3), dtype=np.uint8)
-
-    bg_base = _to_bgr(bg_src)
-    background = create_zoomed_blurred_background(bg_base, width, height)
-
+    background = create_zoomed_blurred_background(random.choice(images), width, height)
     n = len(images)
     cols = int(math.ceil(math.sqrt(n)))
-    rows = int(math.ceil(float(n) / cols))
-
-    cell_w = width // cols
-    cell_h = height // rows
-    margin_factor = 0.9
+    rows = int(math.ceil(n / float(cols)))
+    cell_w, cell_h = width // cols, height // rows
 
     for idx, img in enumerate(images):
-        if img is None or img.size == 0:
-            continue
-
-        if img.ndim == 2:
-            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-        elif img.ndim == 3 and img.shape[2] > 4:
-            img = img[:, :, :4]
-
-        h, w = img.shape[:2]
-        if h == 0 or w == 0:
-            continue
-
-        scale = min((cell_w * margin_factor) / float(w), (cell_h * margin_factor) / float(h))
-        new_w = max(1, int(w * scale))
-        new_h = max(1, int(h * scale))
-        resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-
-        row = idx // cols
-        col = idx % cols
-        cell_x = col * cell_w
-        cell_y = row * cell_h
-        left = cell_x + (cell_w - new_w) // 2
-        top = cell_y + (cell_h - new_h) // 2
-
-        if left < 0 or top < 0 or left + new_w > width or top + new_h > height:
-            left = max(0, left)
-            top = max(0, top)
-            new_w = min(new_w, width - left)
-            new_h = min(new_h, height - top)
-            resized = resized[:new_h, :new_w]
-
-        roi = background[top:top + new_h, left:left + new_w]
-
-        if resized.ndim == 3 and resized.shape[2] == 4:
-            rgb = cv2.cvtColor(resized, cv2.COLOR_BGRA2BGR).astype(np.float32)
-            alpha = resized[:, :, 3].astype(np.float32) / 255.0
-            alpha = alpha[:, :, np.newaxis]
-            roi_f = roi.astype(np.float32)
-            blended = roi_f * (1.0 - alpha) + rgb * alpha
-            background[top:top + new_h, left:left + new_w] = blended.astype(np.uint8)
-        else:
-            background[top:top + new_h, left:left + new_w] = resized
-
-    return background.astype(np.uint8)
+        fitted = resize_to_fit(img, int(cell_w * margin), int(cell_h * margin))
+        row, col = divmod(idx, cols)
+        left = col * cell_w + (cell_w - fitted.shape[1]) // 2
+        top = row * cell_h + (cell_h - fitted.shape[0]) // 2
+        paste(background, fitted, top, left)
+    return background
 
 
-def create_single_image_with_background(image, width, height):
-    """Place an image centered on a zoomed, blurred background of itself."""
-    if image is None:
-        return np.zeros((height, width, 3), dtype=np.uint8)
+def normalize_frame_for_display(frame, enforce_size=True):
+    """Coerce anything image-like into a BGR uint8 frame (frame-sized if asked)."""
+    if not isinstance(frame, np.ndarray) or frame.size == 0:
+        return None
+    normalized = frame
+    if normalized.dtype != np.uint8:
+        normalized = np.clip(normalized, 0, 255).astype(np.uint8)
+    if normalized.ndim == 2:
+        normalized = cv2.cvtColor(normalized, cv2.COLOR_GRAY2BGR)
+    elif normalized.ndim == 3 and normalized.shape[2] != 3:
+        normalized = to_bgr(normalized)
+    elif normalized.ndim != 3:
+        return None
 
-    bg_base = _to_bgr(image)
-    background = create_zoomed_blurred_background(bg_base, width, height)
-
-    img = image
-    if img.ndim == 2:
-        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-    elif img.ndim == 3 and img.shape[2] > 4:
-        img = img[:, :, :4]
-
-    h, w = img.shape[:2]
-    if h == 0 or w == 0:
-        return background
-
-    margin_factor = 0.9
-    scale = min((width * margin_factor) / float(w), (height * margin_factor) / float(h))
-    new_w = max(1, int(w * scale))
-    new_h = max(1, int(h * scale))
-    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-
-    top = (height - new_h) // 2
-    left = (width - new_w) // 2
-
-    if resized.ndim == 3 and resized.shape[2] == 4:
-        rgb = cv2.cvtColor(resized, cv2.COLOR_BGRA2BGR)
-        alpha = resized[:, :, 3].astype(np.float32) / 255.0
-        alpha = alpha[:, :, np.newaxis]
-        roi = background[top:top + new_h, left:left + new_w].astype(np.float32)
-        blended = roi * (1.0 - alpha) + rgb.astype(np.float32) * alpha
-        background[top:top + new_h, left:left + new_w] = blended.astype(np.uint8)
-    else:
-        background[top:top + new_h, left:left + new_w] = resized
-
-    return background.astype(np.uint8)
+    if enforce_size and normalized.shape[:2] != (config.FRAME_HEIGHT, config.FRAME_WIDTH):
+        normalized = cv2.resize(
+            normalized, (config.FRAME_WIDTH, config.FRAME_HEIGHT), interpolation=cv2.INTER_AREA,
+        )
+    return np.ascontiguousarray(normalized)
