@@ -1,262 +1,376 @@
-"""Weather data fetching from OpenWeatherMap — current conditions, forecasts, and icons."""
+"""Weather data from OpenWeatherMap: current conditions, forecasts, and icons.
 
-import json
+Network calls are cached on disk (TTL from config) and always degrade to the
+last good cached value, so callers never see an exception from this module.
+"""
+
+import math
 import os
-from collections import defaultdict
-from datetime import datetime, timedelta
 
 import cv2
+import numpy as np
 import requests
 from requests import RequestException
 
 from slider import config
+from slider.utils import from_timestamp, now_local, read_timed_cache, write_timed_cache
+
+BASE_URL = "https://api.openweathermap.org/data/2.5"
+
 
 # ---------------------------------------------------------------------------
-# Weather icons (lazy-loaded)
+# HTTP
 # ---------------------------------------------------------------------------
 
-_icon_images = None
-
-
-def _load_icons():
-    global _icon_images
-    if _icon_images is not None:
-        return _icon_images
-
-    _icon_images = {}
-    icon_dir = config.resource_path("icons")
-    icon_map = {
-        "clear": "sunny.png",
-        "cloudy": "cloudy.png",
-        "rain": "rain.png",
-        "snow": "snow.png",
-        "windy": "windy.png",
+def _fetch(endpoint, city):
+    """GET an OpenWeatherMap endpoint. Returns the parsed dict or None."""
+    api_key = config.WEATHERMAP_API_KEY
+    if not api_key:
+        return None
+    params = {
+        "q": f"{city},{config.WEATHER_COUNTRY_CODE}",
+        "units": "imperial",
+        "appid": api_key,
     }
-    for key, filename in icon_map.items():
-        path = os.path.join(icon_dir, filename)
-        if os.path.exists(path):
-            _icon_images[key] = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-        else:
-            _icon_images[key] = None
-    return _icon_images
-
-
-def get_weather_icon(description):
-    """Return the appropriate icon image based on the weather description."""
-    icons = _load_icons()
-    description = description.lower()
-    if "clear" in description:
-        return icons.get("clear")
-    elif "cloud" in description:
-        return icons.get("cloudy")
-    elif "rain" in description:
-        return icons.get("rain")
-    elif "wind" in description or "breeze" in description:
-        return icons.get("windy")
-    elif "snow" in description:
-        return icons.get("snow")
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Current weather
-# ---------------------------------------------------------------------------
-
-def get_current_weather(cache_file=None):
-    """Return (temp, weather_description) for the configured city.
-
-    Previously named get_weather_data().
-    """
-    if cache_file is None:
-        cache_file = config.resource_path("weather_cache.json")
-
-    api_key = config.WEATHERMAP_API_KEY
-    if not api_key:
-        print("OpenWeatherMap API key is missing.")
-        return None, None
-
-    if os.path.exists(cache_file):
-        try:
-            with open(cache_file, "r") as f:
-                data = json.load(f)
-            timestamp = datetime.strptime(data["timestamp"], "%Y-%m-%d %H:%M:%S")
-            if datetime.now() - timestamp < timedelta(minutes=15):
-                return data["temp"], data["weather"]
-        except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
-            print(f"Failed to read weather cache: {exc}")
-
-    city = config.WEATHER_CURRENT_CITY
-    country = config.WEATHER_COUNTRY_CODE
-    url = (
-        f"http://api.openweathermap.org/data/2.5/weather"
-        f"?q={city},{country}&units=imperial&appid={api_key}"
-    )
     try:
-        response = requests.get(url, timeout=config.REQUEST_TIMEOUT)
+        response = requests.get(f"{BASE_URL}/{endpoint}", params=params, timeout=config.REQUEST_TIMEOUT)
         response.raise_for_status()
-    except RequestException as exc:
-        print(f"Error fetching weather data: {exc}")
-        return None, None
-
-    if response.status_code == 200:
         data = response.json()
-        temp = data["main"]["temp"]
-        weather = data["weather"][0]["main"]
-        try:
-            with open(cache_file, "w") as f:
-                json.dump({
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "temp": temp,
-                    "weather": weather,
-                }, f)
-        except OSError as exc:
-            print(f"Failed to write weather cache: {exc}")
-        return temp, weather
+    except (RequestException, ValueError) as exc:
+        print(f"Error fetching weather ({endpoint}): {exc}")
+        return None
+    return data if isinstance(data, dict) else None
 
-    print("Error fetching weather data")
-    return None, None
+
+def _num(value, default=None):
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return default
+    return result if math.isfinite(result) else default
 
 
 # ---------------------------------------------------------------------------
-# Today's detailed forecast (3-hour slices)
+# Current conditions
 # ---------------------------------------------------------------------------
 
-def get_todays_forecast(cache_file=None):
-    """Fetch today's detailed forecast (3h slices) and cache it.
+def _parse_current(data):
+    try:
+        main = data["main"]
+        weather = data["weather"][0]
+        temp = _num(main.get("temp"))
+        if temp is None:
+            return None
+        sys_info = data.get("sys") or {}
+        wind = data.get("wind") or {}
+        return {
+            "temp": temp,
+            "feels_like": _num(main.get("feels_like"), temp),
+            "temp_min": _num(main.get("temp_min"), temp),
+            "temp_max": _num(main.get("temp_max"), temp),
+            "humidity": _num(main.get("humidity"), 0),
+            "wind_speed": _num(wind.get("speed"), 0),
+            "wind_gust": _num(wind.get("gust"), 0),
+            "main": str(weather.get("main") or ""),
+            "description": str(weather.get("description") or weather.get("main") or ""),
+            "sunrise": _num(sys_info.get("sunrise")),
+            "sunset": _num(sys_info.get("sunset")),
+            "city": str(data.get("name") or config.WEATHER_CURRENT_CITY),
+        }
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return None
 
-    Previously named get_weather_forecast2().
+
+def get_current_weather():
+    """Return a dict of current conditions, or None if nothing is available.
+
+    Keys: temp, feels_like, temp_min, temp_max, humidity, wind_speed,
+    wind_gust, main, description, sunrise, sunset, city.
     """
-    if cache_file is None:
-        cache_file = config.resource_path("forecast_cache.json")
+    cached, fresh = read_timed_cache(config.WEATHER_CACHE_FILE, config.WEATHER_CACHE_TTL)
+    cached_value = cached.get("current") if cached else None
+    if fresh and isinstance(cached_value, dict):
+        return cached_value
 
-    api_key = config.WEATHERMAP_API_KEY
-    if not api_key:
-        print("OpenWeatherMap API key is missing.")
+    if not config.WEATHERMAP_API_KEY:
+        if cached is None:
+            print("OpenWeatherMap API key is missing.")
+        return cached_value if isinstance(cached_value, dict) else None
+
+    data = _fetch("weather", config.WEATHER_CURRENT_CITY)
+    current = _parse_current(data) if data else None
+    if current:
+        write_timed_cache(config.WEATHER_CACHE_FILE, {"current": current})
+        return current
+    return cached_value if isinstance(cached_value, dict) else None
+
+
+# ---------------------------------------------------------------------------
+# 3-hour forecast entries (shared by today's forecast and the 5-day view)
+# ---------------------------------------------------------------------------
+
+def _simplify_entries(data):
+    entries = []
+    for item in data.get("list", []) or []:
+        try:
+            main = item["main"]
+            weather = item["weather"][0]
+            dt = int(item["dt"])
+            temp = _num(main.get("temp"))
+            if temp is None:
+                continue
+            wind = item.get("wind") or {}
+            entries.append({
+                "dt": dt,
+                "temp": temp,
+                "feels_like": _num(main.get("feels_like"), temp),
+                "temp_min": _num(main.get("temp_min"), temp),
+                "temp_max": _num(main.get("temp_max"), temp),
+                "humidity": _num(main.get("humidity"), 0),
+                "wind_speed": _num(wind.get("speed"), 0),
+                "wind_gust": _num(wind.get("gust"), 0),
+                "pop": _num(item.get("pop"), 0),
+                "rain": _num((item.get("rain") or {}).get("3h"), 0),
+                "snow": _num((item.get("snow") or {}).get("3h"), 0),
+                "main": str(weather.get("main") or ""),
+                "description": str(weather.get("description") or weather.get("main") or ""),
+            })
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+    entries.sort(key=lambda e: e["dt"])
+    return entries
+
+
+def get_forecast_entries():
+    """Return the cached list of 3-hour forecast entries (may be empty)."""
+    cached, fresh = read_timed_cache(config.FORECAST_CACHE_FILE, config.FORECAST_CACHE_TTL)
+    cached_entries = cached.get("entries") if cached else None
+    if fresh and isinstance(cached_entries, list) and cached_entries:
+        return cached_entries
+
+    if not config.WEATHERMAP_API_KEY:
+        if cached is None:
+            print("OpenWeatherMap API key is missing.")
+        return cached_entries if isinstance(cached_entries, list) else []
+
+    data = _fetch("forecast", config.WEATHER_FORECAST_CITY)
+    entries = _simplify_entries(data) if data else []
+    if entries:
+        write_timed_cache(config.FORECAST_CACHE_FILE, {"entries": entries})
+        return entries
+    return cached_entries if isinstance(cached_entries, list) else []
+
+
+def _slice_view(entry):
+    local = from_timestamp(entry["dt"])
+    return {
+        "time": local.strftime("%I:%M %p").lstrip("0"),
+        "temp": entry["temp"],
+        "feels_like": entry.get("feels_like", entry["temp"]),
+        "description": entry["description"],
+        "wind_speed": entry.get("wind_speed", 0),
+        "humidity": entry.get("humidity", 0),
+        "pop": entry.get("pop", 0),
+    }
+
+
+def get_todays_forecast():
+    """Return the remaining 3-hour slices for today.
+
+    Late in the evening, when fewer than two slices remain, the next 24 hours
+    are returned instead so the AI summary always has something to describe.
+    """
+    entries = get_forecast_entries()
+    if not entries:
         return []
+    now = now_local()
+    cutoff = now.timestamp() - 3 * 3600  # keep the slice we are currently in
+    upcoming = [e for e in entries if e["dt"] >= cutoff]
+    todays = [e for e in upcoming if from_timestamp(e["dt"]).date() == now.date()]
+    chosen = todays if len(todays) >= 2 else upcoming[:8]
+    return [_slice_view(e) for e in chosen]
 
-    cached_forecast = None
-    if os.path.exists(cache_file):
-        try:
-            with open(cache_file, "r") as cache_handle:
-                cache_payload = json.load(cache_handle)
-            timestamp = datetime.strptime(cache_payload["timestamp"], "%Y-%m-%d %H:%M:%S")
-            cached_forecast = cache_payload.get("forecast", [])
-            if datetime.now() - timestamp < config.FORECAST_CACHE_TTL:
-                return cached_forecast
-        except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
-            print(f"Failed to read forecast cache: {exc}")
-            cached_forecast = None
-
-    city = config.WEATHER_FORECAST_CITY
-    country = config.WEATHER_COUNTRY_CODE
-    url = (
-        f"http://api.openweathermap.org/data/2.5/forecast"
-        f"?q={city},{country}&units=imperial&appid={api_key}"
-    )
-    try:
-        response = requests.get(url, timeout=config.REQUEST_TIMEOUT)
-        response.raise_for_status()
-    except RequestException as exc:
-        print(f"Error fetching weather data: {exc}")
-        return cached_forecast or []
-
-    if response.status_code == 200:
-        data = response.json()
-        today = datetime.now().strftime("%Y-%m-%d")
-        today_weather = []
-
-        for item in data.get("list", []):
-            dt = datetime.fromtimestamp(item["dt"])
-            if dt.strftime("%Y-%m-%d") == today:
-                today_weather.append({
-                    "time": dt.strftime("%I:%M %p"),
-                    "temp": item["main"]["temp"],
-                    "description": item["weather"][0]["description"],
-                    "wind_speed": item["wind"]["speed"],
-                    "humidity": item["main"]["humidity"],
-                })
-
-        try:
-            with open(cache_file, "w") as cache_handle:
-                json.dump({
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "forecast": today_weather,
-                }, cache_handle)
-        except OSError as exc:
-            print(f"Failed to write forecast cache: {exc}")
-
-        return today_weather
-
-    print("Error fetching weather data.")
-    return cached_forecast or []
-
-
-# ---------------------------------------------------------------------------
-# 5-day forecast
-# ---------------------------------------------------------------------------
 
 def get_5day_forecast():
-    """Return a 5-day (min/max) forecast.
+    """Return up to five daily summaries, or None when no data is available.
 
-    Previously named get_weather_forecast().
+    Each entry: date ("Monday, Sep 23"), date_key (ISO), temp_min, temp_max,
+    description, pop (0-1 chance of precipitation).
     """
-    api_key = config.WEATHERMAP_API_KEY
-    if not api_key:
-        print("OpenWeatherMap API key is missing.")
+    entries = get_forecast_entries()
+    if not entries:
         return None
 
-    city = config.WEATHER_FORECAST_CITY
-    country = config.WEATHER_COUNTRY_CODE
-    url = (
-        f"http://api.openweathermap.org/data/2.5/forecast"
-        f"?q={city},{country}&units=imperial&appid={api_key}"
-    )
-    try:
-        response = requests.get(url, timeout=config.REQUEST_TIMEOUT)
-        response.raise_for_status()
-    except RequestException as exc:
-        print(f"Error fetching weather forecast data: {exc}")
-        return None
+    days = {}
+    for entry in entries:
+        local = from_timestamp(entry["dt"])
+        key = local.date()
+        day = days.setdefault(key, {
+            "temp_min": math.inf, "temp_max": -math.inf,
+            "descriptions": [], "pop": 0.0, "noon": None,
+        })
+        day["temp_min"] = min(day["temp_min"], entry.get("temp_min", entry["temp"]))
+        day["temp_max"] = max(day["temp_max"], entry.get("temp_max", entry["temp"]))
+        day["descriptions"].append(entry["description"])
+        day["pop"] = max(day["pop"], entry.get("pop", 0) or 0)
+        if local.hour == 12:
+            day["noon"] = entry["description"]
 
-    if response.status_code == 200:
-        data = response.json()
-        daily_forecast = defaultdict(
-            lambda: {"temp_min": float("inf"), "temp_max": float("-inf"), "descriptions": []}
-        )
+    forecast = []
+    for key in sorted(days):
+        day = days[key]
+        descriptions = day["descriptions"]
+        dominant = day["noon"] or max(set(descriptions), key=descriptions.count)
+        forecast.append({
+            "date": key.strftime("%A, %b %d"),
+            "date_key": key.isoformat(),
+            "temp_min": day["temp_min"],
+            "temp_max": day["temp_max"],
+            "description": dominant,
+            "pop": day["pop"],
+        })
+    return forecast[:5]
 
-        for item in data.get("list", []):
-            dt = datetime.fromtimestamp(item["dt"])
-            date_key = dt.strftime("%Y-%m-%d")
 
-            daily_forecast[date_key]["temp_min"] = min(
-                daily_forecast[date_key]["temp_min"], item["main"]["temp_min"]
-            )
-            daily_forecast[date_key]["temp_max"] = max(
-                daily_forecast[date_key]["temp_max"], item["main"]["temp_max"]
-            )
-            daily_forecast[date_key]["descriptions"].append(item["weather"][0]["description"])
+def format_clock(unix_ts):
+    """Format a Unix timestamp as e.g. '6:42 AM' in the configured timezone."""
+    if unix_ts is None:
+        return ""
+    return from_timestamp(unix_ts).strftime("%I:%M %p").lstrip("0")
 
-            if dt.hour == 12:
-                daily_forecast[date_key]["main_description"] = item["weather"][0]["description"]
 
-        formatted_forecast = []
-        for date, forecast in daily_forecast.items():
-            dt = datetime.strptime(date, "%Y-%m-%d")
-            descriptions = forecast["descriptions"]
-            dominant_desc = (
-                forecast.get("main_description")
-                if "main_description" in forecast
-                else max(set(descriptions), key=descriptions.count)
-            )
-            formatted_forecast.append({
-                "date": dt.strftime("%A, %b %d"),
-                "temp_min": forecast["temp_min"],
-                "temp_max": forecast["temp_max"],
-                "description": dominant_desc,
-            })
+def build_ai_context(current, today, five_day):
+    """Bundle the pieces the AI summary needs. Any argument may be None/empty."""
+    return {
+        "city": (current or {}).get("city") or config.WEATHER_FORECAST_CITY,
+        "current": current or None,
+        "today": list(today or []),
+        "five_day": list(five_day or []),
+    }
 
-        formatted_forecast.sort(key=lambda x: datetime.strptime(x["date"], "%A, %b %d"))
-        return formatted_forecast[:5]
 
-    print("Error fetching weather forecast data")
+# ---------------------------------------------------------------------------
+# Weather icons: PNGs from icons/ when present, otherwise drawn procedurally
+# ---------------------------------------------------------------------------
+
+_ICON_FILES = {
+    "clear": "sunny.png",
+    "partly": "cloudy.png",
+    "cloudy": "cloudy.png",
+    "rain": "rain.png",
+    "storm": "rain.png",
+    "snow": "snow.png",
+    "windy": "windy.png",
+    "fog": "cloudy.png",
+}
+_icon_cache = {}
+
+
+def icon_kind(description):
+    """Map a weather description to an icon key, or None."""
+    d = (description or "").lower()
+    if "thunder" in d or "storm" in d:
+        return "storm"
+    if "snow" in d or "sleet" in d or "flurr" in d:
+        return "snow"
+    if "rain" in d or "drizzle" in d or "shower" in d:
+        return "rain"
+    if "wind" in d or "breez" in d or "gale" in d:
+        return "windy"
+    if any(k in d for k in ("mist", "fog", "haze", "smoke", "dust", "sand", "ash")):
+        return "fog"
+    if "clear" in d or "sunny" in d:
+        return "clear"
+    if "few clouds" in d or "scattered" in d or "partly" in d:
+        return "partly"
+    if "cloud" in d or "overcast" in d:
+        return "cloudy"
     return None
+
+
+_SUN = (0, 200, 255, 255)
+_CLOUD = (235, 235, 235, 255)
+_CLOUD_DARK = (150, 150, 150, 255)
+_RAIN = (255, 170, 60, 255)
+_SNOW = (255, 245, 235, 255)
+_WIND = (200, 190, 160, 255)
+_FOG = (205, 205, 205, 255)
+
+
+def _cloud(canvas, cx, cy, s, color):
+    cv2.circle(canvas, (int(cx - 0.35 * s), int(cy + 0.05 * s)), int(0.30 * s), color, -1)
+    cv2.circle(canvas, (int(cx), int(cy - 0.15 * s)), int(0.42 * s), color, -1)
+    cv2.circle(canvas, (int(cx + 0.38 * s), int(cy + 0.05 * s)), int(0.30 * s), color, -1)
+    cv2.rectangle(canvas, (int(cx - 0.35 * s), int(cy + 0.05 * s)), (int(cx + 0.38 * s), int(cy + 0.35 * s)), color, -1)
+
+
+def _sun(canvas, cx, cy, r):
+    cv2.circle(canvas, (cx, cy), r, _SUN, -1)
+    for i in range(8):
+        angle = i * math.pi / 4
+        x1 = int(cx + (r + 14) * math.cos(angle))
+        y1 = int(cy + (r + 14) * math.sin(angle))
+        x2 = int(cx + (r + 40) * math.cos(angle))
+        y2 = int(cy + (r + 40) * math.sin(angle))
+        cv2.line(canvas, (x1, y1), (x2, y2), _SUN, 12)
+
+
+def _draw_icon(kind, size):
+    big = 256
+    canvas = np.zeros((big, big, 4), dtype=np.uint8)
+    if kind == "clear":
+        _sun(canvas, 128, 128, 52)
+    elif kind == "partly":
+        _sun(canvas, 100, 100, 44)
+        _cloud(canvas, 150, 150, 100, _CLOUD)
+    elif kind == "cloudy":
+        _cloud(canvas, 90, 105, 80, _CLOUD_DARK)
+        _cloud(canvas, 140, 140, 105, _CLOUD)
+    elif kind == "rain":
+        _cloud(canvas, 128, 100, 100, _CLOUD)
+        for x in (92, 130, 168):
+            cv2.line(canvas, (x, 172), (x - 14, 226), _RAIN, 12)
+    elif kind == "snow":
+        _cloud(canvas, 128, 100, 100, _CLOUD)
+        for x, y in ((92, 195), (130, 215), (168, 195)):
+            cv2.circle(canvas, (x, y), 11, _SNOW, -1)
+    elif kind == "storm":
+        _cloud(canvas, 128, 95, 100, _CLOUD_DARK)
+        bolt = np.array([[140, 150], [104, 210], [132, 210], [116, 252], [166, 190], [140, 190], [156, 150]], np.int32)
+        cv2.fillPoly(canvas, [bolt], _SUN)
+    elif kind == "windy":
+        for (x1, x2, y) in ((40, 190, 95), (60, 215, 135), (40, 170, 175)):
+            cv2.line(canvas, (x1, y), (x2, y), _WIND, 14)
+            cv2.circle(canvas, (x2, y - 16), 16, _WIND, 10)
+    elif kind == "fog":
+        _cloud(canvas, 128, 90, 85, _CLOUD)
+        for y in (165, 195, 225):
+            cv2.line(canvas, (52, y), (204, y), _FOG, 12)
+    else:
+        return None
+    return cv2.resize(canvas, (size, size), interpolation=cv2.INTER_AREA)
+
+
+def get_weather_icon(description, size=64):
+    """Return a BGRA icon for the description (cached), or None if unknown."""
+    kind = icon_kind(description)
+    if kind is None:
+        return None
+    key = (kind, size)
+    if key in _icon_cache:
+        return _icon_cache[key]
+
+    icon = None
+    custom = os.path.join(config.ICONS_DIR, _ICON_FILES.get(kind, ""))
+    if os.path.isfile(custom):
+        loaded = cv2.imread(custom, cv2.IMREAD_UNCHANGED)
+        if loaded is not None and loaded.size:
+            if loaded.ndim == 2:
+                loaded = cv2.cvtColor(loaded, cv2.COLOR_GRAY2BGRA)
+            elif loaded.shape[2] == 3:
+                loaded = cv2.cvtColor(loaded, cv2.COLOR_BGR2BGRA)
+            icon = cv2.resize(loaded, (size, size), interpolation=cv2.INTER_AREA)
+    if icon is None:
+        icon = _draw_icon(kind, size)
+    _icon_cache[key] = icon
+    return icon

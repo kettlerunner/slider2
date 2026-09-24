@@ -6,23 +6,35 @@
     "display_time": 30,
     "fps": 30
   },
+  "timezone": "America/Chicago",
   "weather": {
     "current_city": "Waupun",
     "forecast_city": "Fond du Lac",
     "country_code": "US"
   },
+  "news": {
+    "topics": [
+      "US politics, economics, and Wall Street",
+      "international relations and trade",
+      "semiconductors, AI, science, and technology policy"
+    ],
+    "local_area": "Wisconsin",
+    "max_age_hours": 48
+  },
   "google_drive": {
     "folder_id": "1hpBzZ_kiXpIBtRv1FN3da8zOhT5J0Ggi"
   },
   "camera": {
+    "enabled": true,
     "index": 1,
     "brightness_dark_threshold": 35.0,
     "brightness_check_interval_seconds": 15
   },
   "openai": {
-    "chat_model": "gpt-4o-mini",
-    "news_model": "gpt-4o-mini",
-    "request_timeout": 30
+    "chat_model": "gpt-5-mini",
+    "news_model": "gpt-5-mini",
+    "reasoning_effort": "low",
+    "request_timeout": 60
   },
   "low_power_mode": "auto"
 }

@@ -1,36 +1,37 @@
-"""Video playback and first-frame extraction."""
+"""Video playback with real-time pacing and first-frame extraction."""
+
+import time
 
 import cv2
+import numpy as np
 
 from slider import config
-from slider.image_processing import resize_and_pad
+from slider.image_processing import resize_and_pad, resize_to_fit, to_bgr
 
 
 def get_first_frame(video_path):
-    """Extract the first frame from a video, resized to display dimensions."""
+    """The first frame of a video, fitted to the display, or None."""
     cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        print(f"Could not open video {video_path}")
-        return None
-    ret, frame = cap.read()
-    cap.release()
-    if not ret or frame is None:
+    try:
+        if not cap.isOpened():
+            print(f"Could not open video {video_path}")
+            return None
+        ok, frame = cap.read()
+    finally:
+        cap.release()
+    if not ok or frame is None:
         print(f"Could not read first frame of video {video_path}")
         return None
-    frame = resize_and_pad(frame, config.FRAME_WIDTH, config.FRAME_HEIGHT)
-    return frame
+    return resize_and_pad(frame, config.FRAME_WIDTH, config.FRAME_HEIGHT)
 
 
-def play_video(video_path, present_fn, stop_check=None):
-    """Play a video file, calling present_fn(frame) for each frame.
+def play_video(video_path, present_fn, wait_fn, stop_check=None):
+    """Play a video, calling present_fn(frame) per frame at the file's frame rate.
 
-    Args:
-        video_path: Path to the video file.
-        present_fn: Callable(frame) to display each frame.
-        stop_check: Optional callable returning True to stop early.
+    wait_fn(ms) pumps the GUI and returns the pressed key. Frames are dropped
+    when decoding falls behind so playback stays in sync with the clock.
 
-    Returns:
-        (last_frame, quit_requested) tuple.
+    Returns (last_frame, quit_requested).
     """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -38,32 +39,54 @@ def play_video(video_path, present_fn, stop_check=None):
         return get_first_frame(video_path), False
 
     fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps <= 1:
-        fps = 30
-    wait = int(1000 / fps)
+    if not fps or fps <= 1 or fps > 240:
+        fps = 30.0
+    frame_interval = 1.0 / fps
 
+    width, height = config.FRAME_WIDTH, config.FRAME_HEIGHT
+    canvas = np.zeros((height, width, 3), dtype=np.uint8)
+    placement = None  # (top, left, fitted_w, fitted_h), computed from the first frame
     last_frame = None
     quit_requested = False
+    start = time.monotonic()
+    frame_index = 0
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frame = resize_and_pad(frame, config.FRAME_WIDTH, config.FRAME_HEIGHT)
-        if frame is None:
-            continue
-        last_frame = frame.copy()
-        present_fn(frame)
-        key = cv2.waitKey(wait)
-        if key == ord("q"):
-            quit_requested = True
-            break
-        if stop_check and stop_check():
-            break
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+            frame = to_bgr(frame)
+            if placement is None:
+                fitted = resize_to_fit(frame, width, height)
+                fh, fw = fitted.shape[:2]
+                placement = ((height - fh) // 2, (width - fw) // 2, fw, fh)
+            top, left, fw, fh = placement
+            if frame.shape[1] != fw or frame.shape[0] != fh:
+                frame = cv2.resize(frame, (fw, fh), interpolation=cv2.INTER_AREA if frame.shape[1] > fw else cv2.INTER_LINEAR)
+            canvas[top:top + fh, left:left + fw] = frame
+            present_fn(canvas)
+            last_frame = canvas
 
-    cap.release()
+            frame_index += 1
+            target = start + frame_index * frame_interval
+            delay_ms = int((target - time.monotonic()) * 1000)
+            key = wait_fn(max(1, delay_ms))
+            if key in (ord("q"), ord("Q"), 27):
+                quit_requested = True
+                break
+            if stop_check and stop_check():
+                break
+
+            # Fell behind by more than half a second: skip decoding to catch up.
+            while time.monotonic() - target > 0.5:
+                if not cap.grab():
+                    break
+                frame_index += 1
+                target = start + frame_index * frame_interval
+    finally:
+        cap.release()
 
     if last_frame is None:
-        last_frame = get_first_frame(video_path)
-
-    return last_frame, quit_requested
+        return get_first_frame(video_path), quit_requested
+    return last_frame.copy(), quit_requested

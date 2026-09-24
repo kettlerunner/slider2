@@ -8,9 +8,12 @@ metadata.json
 weather_cache.json
 forecast_cache.json
 news_cache.json
+*.tmp
+captures/
 
 # Python
 __pycache__/
 *.pyc
 *.pyo
 .venv/
+.pytest_cache/
